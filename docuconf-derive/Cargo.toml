@@ -1,0 +1,20 @@
+[package]
+name = "docuconf-derive"
+description = "Derive macros for docuconf: #[derive(Docuconf)] and #[derive(DocuconfEnum)]"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["config", "kubernetes", "figment", "contract", "derive"]
+categories = ["config"]
+readme = "README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

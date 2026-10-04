@@ -1,0 +1,15 @@
+[workspace]
+members = ["docuconf", "docuconf-derive"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+repository = "https://github.com/docuconf/docuconf-rust"
+homepage = "https://docuconf.dev"
+authors = ["docuconf contributors"]
+
+# Certificate and keystore tests run much faster with optimised dependencies.
+[profile.dev.package."*"]
+opt-level = 2
