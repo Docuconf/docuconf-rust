@@ -1,0 +1,199 @@
+# docuconf for Rust
+
+Typed configuration contracts for [figment](https://docs.rs/figment) and serde. Keep your
+`#[derive(Deserialize)]` config struct, add `#[derive(Docuconf)]`, and the struct becomes a contract that your
+Kubernetes platform checks **before deploy** and your service checks again **at boot**. It covers environment
+variables, figment's config files and profiles, and file inputs: TLS key pairs, CA bundles, PKCS#12 keystores,
+JSON/YAML/TOML config files, text and binary files.
+
+Part of [docuconf](https://github.com/docuconf). See the
+[specification](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md).
+
+> **Status:** `0.1.0`. The contract format is a draft (`v1alpha1`) and the API may change.
+>
+> **Licence:** pending. There is no LICENSE file yet, so the crates are not yet licensed for reuse.
+
+## Why figment
+
+figment is how Rust services already layer configuration (Rocket uses it): serde structs, file providers with
+named profiles (`[default]`, `[production]`), and the environment on top. That maps directly onto the spec's
+always-loaded base file, profile files and platform-supplied variables, so docuconf builds on it rather than on
+`envy` (environment only) or `config` (which layers sources but has no named profiles).
+
+## Declare
+
+```rust
+use std::time::Duration;
+use docuconf::{ConfigFile, Docuconf, DocuconfEnum, Secret, TlsKeyPair};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize, Docuconf)]
+pub struct Config {
+    /// HTTP listen port.
+    #[docuconf(default = 8080, min = 1)]
+    pub port: u16,
+
+    /// Primary Postgres connection string.
+    #[docuconf(schemes("postgres", "postgresql"))]
+    pub database_url: Secret<String>,
+
+    /// Minimum log level emitted.
+    #[docuconf(default = "info")]
+    pub log_level: LogLevel,
+
+    /// Upstream request timeout.
+    #[docuconf(default = "30s", max = "5m")]
+    #[serde(with = "docuconf::humantime_serde")]
+    pub request_timeout: Duration,
+
+    /// Certificate the service serves HTTPS with.
+    #[docuconf(path = "/etc/billing/tls", dns_names("billing.internal"), min_remaining = "720h")]
+    pub serving_tls: TlsKeyPair,
+
+    /// Fee schedule, one entry per currency.
+    #[docuconf(path = "/etc/billing/fees/fees.yaml", path_env = "FEES_FILE")]
+    pub fees: ConfigFile<Fees>,
+}
+
+#[derive(Debug, Deserialize, DocuconfEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel { Debug, Info, Warn, Error }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Fees {
+    pub basis_points: std::collections::BTreeMap<String, u32>,
+}
+```
+
+The `///` doc comment is the description (required, at least 5 characters; a trailing period is dropped). A field
+that is not an `Option` and has no `default` is required. The Rust type picks the contract type:
+
+| Field type | Contract |
+|---|---|
+| `String` | `string`; `url` with `schemes(...)` or `url`; `enum` with `values(...)` |
+| `i8`..`i64`, `u8`..`u64`, `isize`, `usize` | `int`, with the type's range as `min`/`max` |
+| `f32`, `f64` | `float` (NaN and infinity rejected) |
+| `bool` | `bool` (`true`/`false`, any case) |
+| `std::time::Duration` + `#[serde(with = "docuconf::humantime_serde")]` | `duration`, encoding `go` |
+| `url::Url` | `url` |
+| `#[derive(DocuconfEnum)]` enum | `enum`, values after serde renames |
+| `Vec<String>`, `Vec<u16>`... | `list`, encoding `json` |
+| `docuconf::Json<T>` (`T: JsonSchema`) | `json`, with the schema from `T` |
+| `docuconf::Secret<T>` | `T` with `secret: true`; `Debug` prints `Secret(***)` |
+| `Option<T>` | optional |
+| nested `#[derive(Docuconf)]` struct | its variables, as `PARENT__CHILD` |
+| `ConfigFile<T>` (`T: Deserialize + JsonSchema`) | file `config` (`format` from the extension or `format = "..."`) |
+| `TlsKeyPair` | file `tls`: `dns_names`, `key_algorithms`, `min_remaining`, `require_ca` |
+| `CaBundle` | file `caBundle`: `min_certificates` |
+| `Keystore` | file `keystore` (PKCS#12): `password_var` names a secret variable |
+| `TextFile` | file `text`: `pattern`, `min_length`, `max_length` |
+| `BinaryFile` | file `binary` |
+
+Variable attributes: `default`, `required`, `secret`, `min`, `max`, `min_length`, `max_length`, `pattern` (RE2,
+matches anywhere: anchor with `^`/`$`), `values`, `schemes`, `min_items`, `max_items`, `group`, `examples`,
+`deprecated`, `replaced_by`, `config_key`, `env`, `description`, `skip`. File attributes: `path` (required),
+`name` (input name; default is the field name with `-`), `path_env`, `reload` (only `"restart"`; `"watch"` is not
+implemented yet and is rejected), `max_size` (`65536` or `"64Ki"`), `required`, `secret`, `group`, `deprecated`,
+plus the type-specific ones above. Mistakes (a bad name, a default outside its own range, a pattern with
+lookaround, a file mounted over `/etc`) are reported by `docuconf::check_declaration::<Config>()`, by export and
+by load.
+
+### Names
+
+Variable names follow figment's `Env::prefixed(prefix).split("__")`: the struct's
+`#[docuconf(prefix = "APP_")]` (empty by default), then the serde key in upper case, with `__` between nesting
+levels. `cache.ttl` under prefix `APP_` is `APP_CACHE__TTL`. `#[docuconf(env = "NAME")]` overrides one name.
+
+### Wire formats
+
+docuconf reads the declared variables itself and hands figment typed values. figment's own `Env` provider trims
+values and guesses types (`8080` is a number even for a `String` field), which the spec forbids, so do not add
+it alongside docuconf. Values are never trimmed; an empty value is unset for every type except `string`; lists
+are JSON arrays (`["a","b"]`, which figment's `Env` also reads), so the contract says `encoding: "json"`;
+durations are parsed with `humantime`, which reads Go syntax such as `1m30s`, so the contract says
+`encoding: "go"`.
+
+## Validate at boot
+
+```rust
+let config: Config = docuconf::load()?;
+```
+
+`load` reads the process environment and every file input, and fails with **all** violations, each with the
+spec's stable code. Secret values never appear:
+
+```text
+docuconf: 3 configuration problems:
+  DATABASE_URL: value has scheme mysql, not one of postgres, postgresql (invalid_scheme)
+  PORT: "80x" is not a 64-bit integer (invalid_type)
+  serving-tls: certificate expires at 2026-12-20T00:00:00Z, in 288h, less than minRemaining 720h (certificate_expiring)
+```
+
+The violations are also written to `/dev/termination-log` when it exists (or to `DOCUCONF_TERMINATION_LOG`), so
+`kubectl describe pod` shows them. `DOCUCONF_FILE_ROOT` is prepended to every absolute file path, including paths
+read from a `path_env` variable, for local development and tests.
+
+File checks: the file exists, is readable and within `max_size`; config files parse (figment's JSON/YAML/TOML
+parsers; a UTF-8 BOM is accepted), match the `schemars` schema (checked with `jsonschema`) and bind to `T`;
+`tls` key pairs parse, the key matches the certificate (rustls), the certificate is valid with at least
+`min_remaining` left, covers every `dns_names` entry (webpki, one-label wildcards), uses an allowed key algorithm
+and, with `require_ca`, chains to `ca.crt` (webpki); CA bundles have `min_certificates` certificates; PKCS#12
+keystores open with their password (`p12-keystore`); text files are UTF-8 and match their constraints.
+
+### Config files and profiles
+
+Give the loader your figment file layers and the variable that selects the profile:
+
+```rust
+use docuconf::figment::{Figment, providers::{Format, Toml}};
+
+let loader = docuconf::Loader::<Config>::new()
+    .figment(Figment::from(Toml::file("App.toml").nested()))
+    .profiles("APP_PROFILE", "production"); // APP_PROFILE must be a declared variable
+let config = loader.load()?;
+```
+
+Layers, lowest first: the declaration's defaults, your figment (its `[default]` and `[global]` tables are
+always loaded, a `[production]` table only when that profile is selected), then the environment, so the
+platform's variables override file values. At export, values in the always-loaded tables become the variables'
+defaults and other tables become the contract's `profiles.defaults`. A secret with a value in a config file is
+an error. Keys that are not declared variables are file-only, and export warns (through `log`) that the platform
+cannot set them. Fields you load from elsewhere (a vault, say) can be left out with `#[docuconf(skip)]`.
+
+Other options: `.dotenv(".env")` reads a `.env` file for development (real variables win), `.env(map)` replaces
+the process environment in tests, `.now(time)` fixes the clock for certificate checks.
+
+## Export
+
+```rust
+let cue = docuconf::export::<Config>(&docuconf::Meta::new("billing-api").app_version("1.4.0"))?;
+std::fs::write("contract.cue", cue)?;
+// or, with config files and profiles: loader.export(&meta)?
+```
+
+`cargo run --example export -- contract.cue` runs a complete example. The output is plain CUE data that unifies
+with the meta-schema's `#Contract` (`generator.language: "rust"`), variables and files sorted by name, and is
+deterministic. `tests/golden/gateway.cue` is a golden export that uses every variable type and every file type.
+
+Feature-flag-like names (`FF_`, `FEATURE_`, `ENABLE_`) produce a warning: flags that change without a rollout
+belong in a flag service (spec §10).
+
+## Not yet supported
+
+- `reload: "watch"` (rejected at declaration time; files are read once at boot).
+- JKS keystores (PKCS#12 only).
+- Falling back from a variable to its `replaced_by` successor; deprecated variables only warn when set.
+- Markdown docs generation and contract-first loading (both SHOULDs in the spec).
+
+## Development
+
+```sh
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+UPDATE_GOLDEN=1 cargo test --test export   # accept a changed golden export
+```
+
+The export tests run `cue vet -c` against the meta-schema when `cue` (v0.17.1) is installed and the spec is at
+`../docuconf-go/spec/cue` or `$DOCUCONF_SPEC_CUE`; they skip otherwise (`DOCUCONF_REQUIRE_VET=1` makes that a
+failure). Minimum supported Rust version: **1.89** (set by the `aes` crate under `p12-keystore`).
