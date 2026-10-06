@@ -182,10 +182,20 @@ pub(crate) fn parse_items<'a>(
         .map(Typed::List)
 }
 
-/// A base-10 integer.
+/// A base-10 integer: `invalid_type` when it is not an integer at all,
+/// `out_of_range` when it is one outside the 64-bit range (SPEC §5).
 fn parse_int(raw: &str) -> Result<i64, ParseError> {
-    raw.parse::<i64>()
-        .map_err(|_| (Code::InvalidType, "is not a 64-bit integer".to_string()))
+    raw.parse::<i64>().map_err(|_| {
+        let digits = raw.strip_prefix(['-', '+']).unwrap_or(raw);
+        if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+            (
+                Code::OutOfRange,
+                "is outside the 64-bit integer range".to_string(),
+            )
+        } else {
+            (Code::InvalidType, "is not a 64-bit integer".to_string())
+        }
+    })
 }
 
 fn json_item(item: ItemKind, i: usize, x: &serde_json::Value) -> Result<Typed, ParseError> {
@@ -199,12 +209,27 @@ fn json_item(item: ItemKind, i: usize, x: &serde_json::Value) -> Result<Typed, P
                     format!("has item {i} that is not a string"),
                 )
             }),
-        ItemKind::Int { .. } => x.as_i64().map(Typed::Int).ok_or_else(|| {
-            (
-                Code::InvalidType,
-                format!("has item {i} that is not a 64-bit integer"),
-            )
-        }),
+        ItemKind::Int { .. } => {
+            if let Some(n) = x.as_i64() {
+                return Ok(Typed::Int(n));
+            }
+            // An integer too large for 64 bits (serde_json reads it as u64
+            // or as a whole f64) is out of range rather than mistyped.
+            let whole_beyond = x.is_u64()
+                || x.as_f64()
+                    .is_some_and(|f| f.fract() == 0.0 && f.abs() >= 9.2e18);
+            Err(if whole_beyond {
+                (
+                    Code::OutOfRange,
+                    format!("has item {i} that is outside the 64-bit integer range"),
+                )
+            } else {
+                (
+                    Code::InvalidType,
+                    format!("has item {i} that is not a 64-bit integer"),
+                )
+            })
+        }
     }
 }
 

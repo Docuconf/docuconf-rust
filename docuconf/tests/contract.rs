@@ -109,6 +109,25 @@ fn defaults_profiles_and_absent_optionals() {
 }
 
 #[test]
+fn integers_beyond_64_bits_are_out_of_range() {
+    let c = contract(json!({
+        "N": {"type": "int", "description": "A number"},
+        "L": {"type": "list", "description": "Numbers", "items": "int"},
+    }));
+    let e = c
+        .load_env([
+            ("N", "99999999999999999999"),
+            ("L", "1,-9223372036854775809"),
+        ])
+        .unwrap_err();
+    assert_eq!(e.codes_for("N"), [Code::OutOfRange]);
+    assert_eq!(e.codes_for("L"), [Code::OutOfRange]);
+    let e = c.load_env([("N", "1e3"), ("L", "1,2.0")]).unwrap_err();
+    assert_eq!(e.codes_for("N"), [Code::InvalidType]);
+    assert_eq!(e.codes_for("L"), [Code::InvalidType]);
+}
+
+#[test]
 fn secrets_are_hidden() {
     let c = contract(json!({
         "TOKEN": {"type": "string", "description": "API token", "secret": true, "minLength": 20},

@@ -8,7 +8,9 @@ use crate::decl::{ListEncoding, VarDecl, VarKind};
 use crate::error::{Code, Violation};
 use crate::value::{self, Typed};
 
-/// A snapshot of the environment.
+/// A snapshot of the environment. Values that are not valid UTF-8 are kept
+/// by name, so they are reported as `invalid_type` rather than looking
+/// unset.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Env {
     pub vars: HashMap<String, String>,
@@ -24,11 +26,20 @@ enum Raw<'a> {
 impl Env {
     /// The process environment, as it is now.
     pub(crate) fn process() -> Env {
-        Env::from_map(
-            std::env::vars_os()
-                .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-                .collect(),
-        )
+        let mut env = Env::default();
+        for (k, v) in std::env::vars_os() {
+            // A name that is not UTF-8 cannot be a declared variable.
+            let Ok(k) = k.into_string() else { continue };
+            match v.into_string() {
+                Ok(v) => {
+                    env.vars.insert(k, v);
+                }
+                Err(_) => {
+                    env.not_utf8.insert(k);
+                }
+            }
+        }
+        env
     }
 
     pub(crate) fn from_map(vars: HashMap<String, String>) -> Env {
