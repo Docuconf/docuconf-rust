@@ -10,8 +10,6 @@ Part of [docuconf](https://github.com/docuconf). See the
 [specification](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md).
 
 > **Status:** `0.1.0`. The contract format is a draft (`v1alpha1`) and the API may change.
->
-> **Licence:** pending. There is no LICENSE file yet, so the crates are not yet licensed for reuse.
 
 ## Why figment
 
@@ -243,3 +241,7 @@ UPDATE_GOLDEN=1 cargo test --test export   # accept a changed golden export
 The export tests run `cue vet -c` against the meta-schema when `cue` (v0.17.1) is installed and the spec is at
 `../docuconf-go/spec/cue` or `$DOCUCONF_SPEC_CUE`; they skip otherwise (`DOCUCONF_REQUIRE_VET=1` makes that a
 failure). Minimum supported Rust version: **1.89** (set by the `aes` crate under `p12-keystore`).
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
