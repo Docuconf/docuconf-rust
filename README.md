@@ -175,6 +175,40 @@ cannot set them. Fields you load from elsewhere (a vault, say) can be left out w
 Other options: `.dotenv(".env")` reads a `.env` file for development (real variables win), `.env(map)` replaces
 the process environment in tests, `.now(time)` fixes the clock for certificate checks.
 
+### Config-file overlays
+
+The platform can supply values in one more config file, mounted from a ConfigMap, instead of the environment
+(spec §4.7). Declare it on the loader:
+
+```rust
+use docuconf::{Meta, Overlay};
+
+fn loader() -> docuconf::Loader<Config> {
+    docuconf::Loader::new()
+        .figment(Figment::from(Toml::file("App.toml").nested()))
+        .profiles("APP_PROFILE", "production")
+        .overlay(Overlay::new("platform", "/etc/app/platform/app.toml")) // format from the extension
+}
+
+let config = loader().load()?;                          // at boot
+let cue = loader().export(&Meta::new("billing-api"))?;  // the same loader for export
+```
+
+Layers, lowest first: declaration defaults, your figment (base and selected profile), the overlay, the
+environment. The overlay goes in figment's global profile, so it also beats a `[global]` table. A missing overlay
+is fine; one that cannot be read or parsed is a `file_unreadable` or `file_malformed` violation named after the
+overlay, and its values are checked like any other. The format is TOML, JSON or YAML (from the extension, or
+`.format(OverlayFormat::Json)`).
+
+The export adds `overlays.platform` (`keySeparator: "."`, `reload: "restart"`) and a `configKey` on every
+variable the overlay may carry: figment's dotted key path, such as `cache.ttl` for `APP_CACHE__TTL`. Secrets and
+the profile selector get none. With overlays declared, a `#[docuconf(config_key = ...)]` must equal that path.
+
+docuconf refuses, at export and at boot, an overlay whose directory is reserved, shared with a file input, or
+holds files the app ships with (the directory of a config file in your figment, or of the executable), because
+the mount would hide them. `Reload::Watch` is rejected: the overlay is read once at boot, and a change rolls the
+pods.
+
 ## Export
 
 ```rust
@@ -192,7 +226,7 @@ belong in a flag service (spec §10).
 
 ## Not yet supported
 
-- `reload: "watch"` (rejected at declaration time; files are read once at boot).
+- `reload: "watch"`, for file inputs and overlays (rejected at declaration time; files are read once at boot).
 - JKS keystores (PKCS#12 only).
 - Falling back from a variable to its `replaced_by` successor; deprecated variables only warn when set.
 - Markdown docs generation and contract-first loading (both SHOULDs in the spec).

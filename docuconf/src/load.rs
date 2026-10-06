@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::marker::PhantomData;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use figment::providers::Serialized;
@@ -15,6 +15,7 @@ use crate::decl::{self, Declaration};
 use crate::error::{Code, DeclarationError, Error, ValidationError, Violation};
 use crate::export::{self, Meta, Profiles};
 use crate::files::{self, FileCx, Outcome};
+use crate::overlay::{self, Overlay};
 use crate::types;
 use crate::value::{self, Typed};
 use crate::Docuconf;
@@ -42,6 +43,7 @@ use crate::Docuconf;
 pub struct Loader<C> {
     figment: Option<Figment>,
     profiles: Option<Profiles>,
+    overlays: Vec<Overlay>,
     env: Option<HashMap<String, String>>,
     dotenv: Option<PathBuf>,
     now: Option<SystemTime>,
@@ -54,6 +56,7 @@ impl<C> Default for Loader<C> {
         Loader {
             figment: None,
             profiles: None,
+            overlays: Vec::new(),
             env: None,
             dotenv: None,
             now: None,
@@ -67,6 +70,7 @@ impl<C> std::fmt::Debug for Loader<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Loader")
             .field("profiles", &self.profiles)
+            .field("overlays", &self.overlays)
             .field("dotenv", &self.dotenv)
             .finish_non_exhaustive()
     }
@@ -113,6 +117,16 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
             selector: selector.to_string(),
             default: default.to_string(),
         });
+        self
+    }
+
+    /// Adds a config-file overlay the platform mounts (SPEC §4.7). It is
+    /// layered above the app's figment, profiles included, and below the
+    /// environment, and is optional: a missing file is fine. Exported as
+    /// the contract's `overlays`, with a `configKey` (figment's dotted key
+    /// path, `keySeparator: "."`) on every variable it may carry.
+    pub fn overlay(mut self, overlay: Overlay) -> Self {
+        self.overlays.push(overlay);
         self
     }
 
@@ -178,7 +192,27 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
                 Some(fv)
             }
         };
-        export::render(&decl, meta, values.as_ref(), self.profiles.as_ref())
+        let warnings = overlay::check(
+            &decl,
+            &self.overlays,
+            self.selector(),
+            &overlay::shipped_dirs(self.figment.as_ref()),
+            None,
+        )?;
+        for w in &warnings {
+            log::warn!("docuconf: {w}");
+        }
+        export::render(
+            &decl,
+            meta,
+            values.as_ref(),
+            self.profiles.as_ref(),
+            &self.overlays,
+        )
+    }
+
+    fn selector(&self) -> Option<&str> {
+        self.profiles.as_ref().map(|p| p.selector.as_str())
     }
 
     fn environment(&self) -> HashMap<String, String> {
@@ -207,6 +241,22 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
             log::warn!("docuconf: {w}");
         }
         let env = self.environment();
+        if !self.overlays.is_empty() {
+            let mut app_dirs = overlay::shipped_dirs(self.figment.as_ref());
+            if let Some(dir) = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(Path::to_path_buf))
+            {
+                app_dirs.push(dir);
+            }
+            overlay::check(
+                &decl,
+                &self.overlays,
+                self.selector(),
+                &app_dirs,
+                file_root(&env).as_deref(),
+            )?;
+        }
         match self.load_with(&decl, &env) {
             Ok(c) => Ok(c),
             Err(e) => {
@@ -287,7 +337,9 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
             }
         }
 
-        // 2. Layers: declaration defaults < app files < environment.
+        // 2. Layers: declaration defaults < app files < overlays <
+        //    environment (SPEC §4.7).
+        let root = file_root(env);
         let profile = match &self.profiles {
             Some(p) => env
                 .get(&p.selector)
@@ -299,6 +351,13 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
         let mut fig = Figment::new().merge(Serialized::defaults(defaults));
         if let Some(app) = &self.figment {
             fig = fig.merge(app.clone());
+        }
+        for o in &self.overlays {
+            match o.read(root.as_deref()) {
+                Ok(Some(layer)) => fig = fig.merge(layer),
+                Ok(None) => {}
+                Err(v) => viols.push(v),
+            }
         }
         fig = fig
             .merge(Serialized::globals(env_layer))
@@ -357,10 +416,6 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
         }
 
         // 4. Files.
-        let root = env
-            .get("DOCUCONF_FILE_ROOT")
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from);
         let fcx = FileCx {
             root,
             env,
@@ -437,6 +492,12 @@ fn unresolved_reference(raw: &str) -> Option<&'static str> {
     ["vault:", "op://", "ref+"]
         .into_iter()
         .find(|scheme| raw.starts_with(scheme))
+}
+
+fn file_root(env: &HashMap<String, String>) -> Option<PathBuf> {
+    env.get("DOCUCONF_FILE_ROOT")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
 }
 
 fn write_termination_log(env: &HashMap<String, String>, e: &ValidationError) {

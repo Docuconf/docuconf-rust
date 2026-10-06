@@ -83,7 +83,8 @@ impl fmt::Display for Code {
 /// of a secret file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
-    /// The environment variable name, or the file input name.
+    /// The environment variable name, the file input name, or the overlay
+    /// name (for an overlay that cannot be read or parsed).
     pub input: String,
     /// The stable violation code.
     pub code: Code,

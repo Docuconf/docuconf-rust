@@ -55,6 +55,8 @@
 //! ```
 //!
 //! At boot, `let config: Config = docuconf::load()?;`.
+//! [`Loader`] adds the app's own config files, profiles and a platform
+//! config-file [`Overlay`].
 //!
 //! ## Types
 //!
@@ -106,6 +108,7 @@ mod error;
 mod export;
 mod files;
 mod load;
+mod overlay;
 mod schema;
 mod types;
 mod value;
@@ -118,6 +121,7 @@ pub use duration::format_go;
 pub use error::{Code, DeclarationError, Error, ValidationError, Violation};
 pub use export::Meta;
 pub use load::Loader;
+pub use overlay::{Overlay, OverlayFormat, Reload};
 pub use types::{BinaryFile, CaBundle, ConfigFile, Json, Keystore, Secret, TextFile, TlsKeyPair};
 
 /// Re-exported for `#[serde(with = "docuconf::humantime_serde")]` on
