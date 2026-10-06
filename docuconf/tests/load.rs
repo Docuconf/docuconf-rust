@@ -432,3 +432,32 @@ fn prefix_and_nesting_follow_figment_env_rules() {
         assert!(cue.contains(name), "{name} missing from\n{cue}");
     }
 }
+
+#[test]
+fn unsigned_numbers_from_json_and_yaml_files_bind() {
+    use docuconf::figment::providers::{Format, Json, Yaml};
+    use docuconf::figment::Figment;
+
+    #[derive(Debug, Deserialize, Docuconf)]
+    struct Pool {
+        /// Number of pooled connections.
+        #[docuconf(default = 4, min = 1)]
+        size: u32,
+        /// Fraction of connections kept warm.
+        #[docuconf(default = 0.5)]
+        warm: f64,
+    }
+    for fig in [
+        Figment::from(Json::string(r#"{"size": 16, "warm": 1}"#)),
+        Figment::from(Yaml::string("size: 16\nwarm: 1\n")),
+    ] {
+        let p = docuconf::Loader::<Pool>::new()
+            .figment(fig)
+            .env(Vec::<(String, String)>::new())
+            .termination_log(false)
+            .load()
+            .unwrap();
+        assert_eq!(p.size, 16);
+        assert_eq!(p.warm, 1.0);
+    }
+}

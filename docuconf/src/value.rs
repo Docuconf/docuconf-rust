@@ -167,7 +167,12 @@ fn json_item(item: ItemKind, x: &serde_json::Value) -> Result<Typed, String> {
 }
 
 fn num_i64(n: &Num) -> Option<i64> {
-    n.to_i128().and_then(|i| i64::try_from(i).ok())
+    // JSON and YAML parsers give non-negative integers as unsigned, which
+    // figment's to_i128 does not convert.
+    match n.to_i128() {
+        Some(i) => i64::try_from(i).ok(),
+        None => n.to_u128().and_then(|u| i64::try_from(u).ok()),
+    }
 }
 
 /// Reads a variable's value from a merged figment layer (an app config file
@@ -179,7 +184,11 @@ pub(crate) fn from_figment(kind: &VarKind, v: &Value) -> Result<Typed, String> {
             Ok(Typed::Str(s.clone()))
         }
         (VarKind::Int { .. }, Value::Num(_, n)) => num_i64(n).map(Typed::Int).ok_or_else(wrong),
-        (VarKind::Float, Value::Num(_, n)) => match n.to_f64() {
+        (VarKind::Float, Value::Num(_, n)) => match n
+            .to_f64()
+            .or_else(|| n.to_i128().map(|i| i as f64))
+            .or_else(|| n.to_u128().map(|u| u as f64))
+        {
             Some(f) if f.is_finite() => Ok(Typed::Float(f)),
             _ => Err(wrong()),
         },
