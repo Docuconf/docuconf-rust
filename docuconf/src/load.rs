@@ -253,6 +253,22 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
                     .unwrap_or_default();
                 log::warn!("docuconf: {} is deprecated: {msg}{by}", var.name);
             }
+            // An injector reference that is still there means the injector
+            // did not run (SPEC §4.5.1, §11.2). Name the scheme, never the
+            // value.
+            if var.secret {
+                if let Some(scheme) = unresolved_reference(raw) {
+                    viols.push(violation(
+                        &var.name,
+                        Code::InvalidType,
+                        format!(
+                            "holds an unresolved {scheme} reference; the injector that should resolve it did not run"
+                        ),
+                    ));
+                    failed.insert(var.name.clone());
+                    continue;
+                }
+            }
             match value::parse_wire(&var.kind, raw) {
                 Ok(t) => insert_path(&mut env_layer, &var.key, t.to_figment()),
                 Err(e) => {
@@ -413,6 +429,14 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
             ValidationError { violations }
         })
     }
+}
+
+/// The scheme of an injector reference (Bank-Vaults `vault:`, 1Password
+/// `op://`, vals `ref+`) when `raw` is one.
+fn unresolved_reference(raw: &str) -> Option<&'static str> {
+    ["vault:", "op://", "ref+"]
+        .into_iter()
+        .find(|scheme| raw.starts_with(scheme))
 }
 
 fn write_termination_log(env: &HashMap<String, String>, e: &ValidationError) {

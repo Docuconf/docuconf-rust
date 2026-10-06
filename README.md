@@ -140,6 +140,18 @@ parsers; a UTF-8 BOM is accepted), match the `schemars` schema (checked with `js
 and, with `require_ca`, chains to `ca.crt` (webpki); CA bundles have `min_certificates` certificates; PKCS#12
 keystores open with their password (`p12-keystore`); text files are UTF-8 and match their constraints.
 
+### Injected secrets
+
+Platforms often inject values when the container starts: Bank-Vaults' `vault-env` resolves `vault:` references,
+`op run` resolves `op://` ones, operators add variables. docuconf reads the environment as the process sees it,
+after injection, so injected values are validated like any other and docuconf never resolves a reference itself.
+When the injector did not run, a secret variable still holds the raw reference; a value starting with `vault:`,
+`op://` or `ref+` fails with `invalid_type`, naming the variable and the scheme but never the value:
+
+```text
+DATABASE_URL: holds an unresolved vault: reference; the injector that should resolve it did not run (invalid_type)
+```
+
 ### Config files and profiles
 
 Give the loader your figment file layers and the variable that selects the profile:

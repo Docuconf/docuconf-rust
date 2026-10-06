@@ -340,6 +340,48 @@ fn writes_the_termination_log() {
 }
 
 #[test]
+fn unresolved_injector_references_are_reported_without_the_value() {
+    let mut w = World::new();
+    let log = w.dir.path().join("termination-log");
+    w.set("DOCUCONF_TERMINATION_LOG", log.to_str().unwrap())
+        .set("DATABASE_URL", "vault:secret/data/gateway/db#hunter2")
+        .set("METRICS_TOKEN", "op://vault-hunter2/metrics/token")
+        .set("PARTNER_KEYSTORE_PASSWORD", "ref+awsssm://hunter2/partner")
+        // Not a secret: a value that happens to look like a reference is
+        // just a value.
+        .set("POD_NAMESPACE", "vault:edge");
+    let err = docuconf::Loader::<Gateway>::new()
+        .env(w.env.clone())
+        .now(common::now())
+        .load()
+        .unwrap_err();
+    let Error::Validation(v) = &err else {
+        panic!("expected violations, got {err}")
+    };
+    assert_eq!(v.codes_for("DATABASE_URL"), [Code::InvalidType]);
+    assert_eq!(v.codes_for("METRICS_TOKEN"), [Code::InvalidType]);
+    assert_eq!(
+        v.codes_for("PARTNER_KEYSTORE_PASSWORD"),
+        [Code::InvalidType]
+    );
+    assert!(v.codes_for("POD_NAMESPACE").is_empty());
+    let text = err.to_string();
+    assert!(
+        text.contains(
+            "DATABASE_URL: holds an unresolved vault: reference; the injector that should resolve it did not run (invalid_type)"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("METRICS_TOKEN: holds an unresolved op:// reference"));
+    assert!(text.contains("PARTNER_KEYSTORE_PASSWORD: holds an unresolved ref+ reference"));
+    let written = std::fs::read_to_string(&log).unwrap();
+    for leaked in [text.as_str(), written.as_str()] {
+        assert!(!leaked.contains("hunter2"), "value leaked: {leaked}");
+        assert!(!leaked.contains("secret/data"), "value leaked: {leaked}");
+    }
+}
+
+#[test]
 fn dotenv_is_opt_in_and_the_environment_wins() {
     let w = World::new();
     let file = w.dir.path().join(".env");
