@@ -191,7 +191,7 @@ pub struct DeclCx {
 }
 
 /// Mount directories a file input must never hide (files.cue #ReservedDirs).
-const RESERVED_DIRS: &[&str] = &[
+pub(crate) const RESERVED_DIRS: &[&str] = &[
     "/",
     "/app",
     "/bin",
@@ -256,7 +256,7 @@ pub(crate) fn is_env_name(s: &str) -> bool {
         && c.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
-fn is_input_name(s: &str) -> bool {
+pub(crate) fn is_input_name(s: &str) -> bool {
     let b = s.as_bytes();
     !b.is_empty()
         && b.len() <= 42
@@ -266,7 +266,7 @@ fn is_input_name(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
 }
 
-fn is_abs_path(p: &str) -> bool {
+pub(crate) fn is_abs_path(p: &str) -> bool {
     p.starts_with('/')
         && p.len() > 1
         && !p.ends_with('/')

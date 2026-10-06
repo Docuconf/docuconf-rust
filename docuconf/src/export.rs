@@ -8,6 +8,7 @@ use figment::{Figment, Profile, Provider};
 use crate::cue::{body, Node};
 use crate::decl::{Declaration, FileDecl, FileKind, ItemKind, VarDecl, VarKind};
 use crate::error::DeclarationError;
+use crate::overlay::{self, Overlay};
 use crate::value::{self, Typed};
 
 /// Contract metadata.
@@ -178,7 +179,7 @@ fn deprecated(msg: &Option<String>, by: &Option<String>) -> Option<Node> {
     Some(Node::Struct(f))
 }
 
-fn var_node(v: &VarDecl, file_default: Option<&Typed>) -> Node {
+fn var_node(v: &VarDecl, file_default: Option<&Typed>, config_key: Option<&String>) -> Node {
     let mut f: Vec<(String, Node)> = Vec::new();
     let mut add = |k: &str, n: Node| f.push((k.to_string(), n));
     add("type", Node::Str(v.kind.type_name().into()));
@@ -204,7 +205,7 @@ fn var_node(v: &VarDecl, file_default: Option<&Typed>) -> Node {
     if let Some(d) = deprecated(&v.deprecated, &v.replaced_by) {
         add("deprecated", d);
     }
-    if let Some(k) = &v.config_key {
+    if let Some(k) = config_key.or(v.config_key.as_ref()) {
         add("configKey", Node::Str(k.clone()));
     }
     match &v.kind {
@@ -337,6 +338,21 @@ fn file_node(d: &FileDecl) -> Node {
     Node::Struct(f)
 }
 
+fn overlay_node(o: &Overlay) -> Node {
+    let mut f: Vec<(String, Node)> = Vec::new();
+    if let Some(d) = o.description_text() {
+        f.push(("description".into(), Node::Str(d.trim().to_string())));
+    }
+    f.push(("format".into(), Node::Str(o.format_name().into())));
+    f.push(("path".into(), Node::Str(o.path().into())));
+    f.push((
+        "keySeparator".into(),
+        Node::Str(overlay::KEY_SEPARATOR.into()),
+    ));
+    f.push(("reload".into(), Node::Str("restart".into())));
+    Node::Struct(f)
+}
+
 fn is_dns_label(s: &str) -> bool {
     let b = s.as_bytes();
     !b.is_empty()
@@ -353,6 +369,7 @@ pub(crate) fn render(
     meta: &Meta,
     values: Option<&FileValues>,
     profiles: Option<&Profiles>,
+    overlays: &[Overlay],
 ) -> Result<String, DeclarationError> {
     let mut problems = Vec::new();
     if !is_dns_label(&meta.name) {
@@ -406,13 +423,18 @@ pub(crate) fn render(
     }
     metadata.push(("generator".into(), Node::Struct(generator)));
 
+    let config_keys = if overlays.is_empty() {
+        BTreeMap::new()
+    } else {
+        overlay::config_keys(decl, profiles.map(|p| p.selector.as_str()))
+    };
     let base = values.map(|f| &f.base);
     let vars = decl
         .vars
         .iter()
         .map(|v| {
             let fd = base.and_then(|b| b.get(&v.name));
-            (v.name.clone(), var_node(v, fd))
+            (v.name.clone(), var_node(v, fd, config_keys.get(&v.name)))
         })
         .collect();
     let mut top = vec![
@@ -431,6 +453,17 @@ pub(crate) fn render(
                 decl.files
                     .iter()
                     .map(|f| (f.name.clone(), file_node(f)))
+                    .collect(),
+            ),
+        ));
+    }
+    if !overlays.is_empty() {
+        top.push((
+            "overlays".into(),
+            Node::Struct(
+                overlays
+                    .iter()
+                    .map(|o| (o.name().to_string(), overlay_node(o)))
                     .collect(),
             ),
         ));

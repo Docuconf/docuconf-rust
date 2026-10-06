@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use docuconf::url::Url;
@@ -352,4 +353,79 @@ impl World {
 
 pub fn root(p: &Path) -> String {
     p.to_str().unwrap().to_string()
+}
+
+// ---------------------------------------------------------------------------
+// cue
+
+pub fn cue_binary() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("CUE") {
+        return Some(p.into());
+    }
+    let mut candidates: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).map(|d| d.join("cue")).collect())
+        .unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(Path::new(&home).join("go/bin/cue"));
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+pub fn spec_dir() -> Option<PathBuf> {
+    let p = match std::env::var_os("DOCUCONF_SPEC_CUE") {
+        Some(p) => PathBuf::from(p),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docuconf-go/spec/cue"),
+    };
+    p.join("contract/contract.cue").is_file().then_some(p)
+}
+
+pub fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for e in std::fs::read_dir(src).unwrap() {
+        let e = e.unwrap();
+        let to = dst.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            copy_dir(&e.path(), &to);
+        } else {
+            std::fs::copy(e.path(), to).unwrap();
+        }
+    }
+}
+
+/// A copy of the spec's CUE module (module `docuconf.dev`) with the
+/// contract in package directory `svc`, and the cue binary. `None` when
+/// cue or the meta-schema is not available.
+pub fn cue_module(contract: &str) -> Option<(PathBuf, tempfile::TempDir)> {
+    let (cue, spec) = match (cue_binary(), spec_dir()) {
+        (Some(c), Some(s)) => (c, s),
+        _ => {
+            if std::env::var_os("DOCUCONF_REQUIRE_VET").is_some() {
+                panic!("cue or the meta-schema (DOCUCONF_SPEC_CUE) is missing");
+            }
+            eprintln!("skipping cue vet: install cuelang.org/go/cmd/cue@v0.17.1 and set DOCUCONF_SPEC_CUE");
+            return None;
+        }
+    };
+    let dir = tempfile::tempdir().unwrap();
+    copy_dir(&spec.join("cue.mod"), &dir.path().join("cue.mod"));
+    copy_dir(&spec.join("contract"), &dir.path().join("contract"));
+    std::fs::create_dir_all(dir.path().join("svc")).unwrap();
+    std::fs::write(dir.path().join("svc/contract.cue"), contract).unwrap();
+    Some((cue, dir))
+}
+
+/// Runs `cue vet -c` on a contract in a copy of the spec's CUE module.
+/// `None` when cue or the meta-schema is not available.
+pub fn cue_vet(contract: &str) -> Option<Result<(), String>> {
+    let (cue, dir) = cue_module(contract)?;
+    let out = Command::new(cue)
+        .args(["vet", "-c", "./svc"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    Some(if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    })
 }
