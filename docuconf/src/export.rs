@@ -6,7 +6,7 @@ use figment::value::{Dict, Value};
 use figment::{Figment, Profile, Provider};
 
 use crate::cue::{body, Node};
-use crate::decl::{Declaration, FileDecl, FileKind, ItemKind, VarDecl, VarKind};
+use crate::decl::{Declaration, FileDecl, FileKind, ItemKind, ListEncoding, VarDecl, VarKind};
 use crate::error::DeclarationError;
 use crate::overlay::{self, Overlay};
 use crate::value::{self, Typed};
@@ -229,7 +229,7 @@ fn var_node(v: &VarDecl, file_default: Option<&Typed>, config_key: Option<&Strin
             }
         }
         VarKind::Duration => {
-            add("encoding", Node::Str("go".into()));
+            add("encoding", Node::Str(v.duration_encoding.name().into()));
             if let Some(m) = &v.min {
                 add("min", typed_node(m));
             }
@@ -254,7 +254,10 @@ fn var_node(v: &VarDecl, file_default: Option<&Typed>, config_key: Option<&Strin
                     .into(),
                 ),
             );
-            add("encoding", Node::Str("json".into()));
+            add("encoding", Node::Str(v.list_encoding.name().into()));
+            if let ListEncoding::Csv(sep) = &v.list_encoding {
+                add("separator", Node::Str(sep.clone()));
+            }
             if let Some(n) = v.min_items {
                 add("minItems", Node::Int(n as i64));
             }

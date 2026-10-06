@@ -12,6 +12,7 @@ use figment::{Figment, Profile};
 use serde::de::DeserializeOwned;
 
 use crate::decl::{self, Declaration};
+use crate::env::{self, Env};
 use crate::error::{Code, DeclarationError, Error, ValidationError, Violation};
 use crate::export::{self, Meta, Profiles};
 use crate::files::{self, FileCx, Outcome};
@@ -215,17 +216,15 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
         self.profiles.as_ref().map(|p| p.selector.as_str())
     }
 
-    fn environment(&self) -> HashMap<String, String> {
-        let mut env: HashMap<String, String> = match &self.env {
-            Some(e) => e.clone(),
-            None => std::env::vars_os()
-                .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-                .collect(),
+    fn environment(&self) -> Env {
+        let mut env = match &self.env {
+            Some(e) => Env::from_map(e.clone()),
+            None => Env::process(),
         };
         if let Some(path) = &self.dotenv {
             if let Ok(iter) = dotenvy::from_path_iter(path) {
                 for (k, v) in iter.flatten() {
-                    env.entry(k).or_insert(v);
+                    env.add_default(k, v);
                 }
             }
         }
@@ -254,25 +253,21 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
                 &self.overlays,
                 self.selector(),
                 &app_dirs,
-                file_root(&env).as_deref(),
+                file_root(&env.vars).as_deref(),
             )?;
         }
         match self.load_with(&decl, &env) {
             Ok(c) => Ok(c),
             Err(e) => {
                 if self.termination_log {
-                    write_termination_log(&env, &e);
+                    write_termination_log(&env.vars, &e);
                 }
                 Err(Error::Validation(e))
             }
         }
     }
 
-    fn load_with(
-        &self,
-        decl: &Declaration,
-        env: &HashMap<String, String>,
-    ) -> Result<C, ValidationError> {
+    fn load_with(&self, decl: &Declaration, env: &Env) -> Result<C, ValidationError> {
         let mut viols: Vec<Violation> = Vec::new();
         let mut failed: BTreeSet<String> = BTreeSet::new();
         let violation = |input: &str, code: Code, message: String| Violation {
@@ -288,50 +283,11 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
             if let Some(d) = &var.default {
                 insert_path(&mut defaults, &var.key, d.to_figment());
             }
-            let Some(raw) = env.get(&var.name) else {
-                continue;
-            };
-            // An empty string is unset for every type but string (SPEC §5).
-            if raw.is_empty() && !matches!(var.kind, crate::decl::VarKind::String) {
-                continue;
-            }
-            if let Some(msg) = &var.deprecated {
-                let by = var
-                    .replaced_by
-                    .as_ref()
-                    .map(|r| format!("; use {r}"))
-                    .unwrap_or_default();
-                log::warn!("docuconf: {} is deprecated: {msg}{by}", var.name);
-            }
-            // An injector reference that is still there means the injector
-            // did not run (SPEC §4.5.1, §11.2). Name the scheme, never the
-            // value.
-            if var.secret {
-                if let Some(scheme) = unresolved_reference(raw) {
-                    viols.push(violation(
-                        &var.name,
-                        Code::InvalidType,
-                        format!(
-                            "holds an unresolved {scheme} reference; the injector that should resolve it did not run"
-                        ),
-                    ));
-                    failed.insert(var.name.clone());
-                    continue;
-                }
-            }
-            match value::parse_wire(&var.kind, raw) {
-                Ok(t) => insert_path(&mut env_layer, &var.key, t.to_figment()),
-                Err(e) => {
-                    let shown = if var.secret {
-                        "value".to_string()
-                    } else {
-                        Typed::Str(raw.clone()).show()
-                    };
-                    viols.push(violation(
-                        &var.name,
-                        Code::InvalidType,
-                        format!("{shown} {e}"),
-                    ));
+            match env::read(var, env) {
+                Ok(None) => {}
+                Ok(Some(t)) => insert_path(&mut env_layer, &var.key, t.to_figment()),
+                Err(v) => {
+                    viols.push(v);
                     failed.insert(var.name.clone());
                 }
             }
@@ -339,12 +295,12 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
 
         // 2. Layers: declaration defaults < app files < overlays <
         //    environment (SPEC §4.7).
-        let root = file_root(env);
+        let root = file_root(&env.vars);
         let profile = match &self.profiles {
             Some(p) => env
                 .get(&p.selector)
                 .filter(|s| !s.is_empty())
-                .cloned()
+                .map(str::to_string)
                 .unwrap_or_else(|| p.default.clone()),
             None => Profile::Default.as_str().to_string(),
         };
@@ -372,11 +328,7 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
             match fig.find_value(&var.key_path()) {
                 Err(_) => {
                     if var.required {
-                        viols.push(violation(
-                            &var.name,
-                            Code::MissingRequired,
-                            "is required but not set".into(),
-                        ));
+                        viols.push(env::missing(var));
                         failed.insert(var.name.clone());
                     }
                 }
@@ -394,23 +346,15 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
                         ));
                         failed.insert(var.name.clone());
                     }
-                    Ok(t) => {
-                        let problems = value::check(var, &t);
-                        if problems.is_empty() {
+                    Ok(t) => match env::finish(var, t) {
+                        Ok(t) => {
                             values.insert(var.name.clone(), t);
-                        } else {
-                            failed.insert(var.name.clone());
-                            let hint = match (&t, var.secret) {
-                                (Typed::Str(s), true) if s.ends_with('\n') => {
-                                    " (the value ends in a newline: was the secret created from a file?)"
-                                }
-                                _ => "",
-                            };
-                            for (code, msg) in problems {
-                                viols.push(violation(&var.name, code, format!("{msg}{hint}")));
-                            }
                         }
-                    }
+                        Err(v) => {
+                            failed.insert(var.name.clone());
+                            viols.extend(v);
+                        }
+                    },
                 },
             }
         }
@@ -418,7 +362,7 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
         // 4. Files.
         let fcx = FileCx {
             root,
-            env,
+            env: &env.vars,
             now: self.now.unwrap_or_else(SystemTime::now),
             values: &values,
         };
@@ -486,21 +430,13 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
     }
 }
 
-/// The scheme of an injector reference (Bank-Vaults `vault:`, 1Password
-/// `op://`, vals `ref+`) when `raw` is one.
-fn unresolved_reference(raw: &str) -> Option<&'static str> {
-    ["vault:", "op://", "ref+"]
-        .into_iter()
-        .find(|scheme| raw.starts_with(scheme))
-}
-
-fn file_root(env: &HashMap<String, String>) -> Option<PathBuf> {
+pub(crate) fn file_root(env: &HashMap<String, String>) -> Option<PathBuf> {
     env.get("DOCUCONF_FILE_ROOT")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
 }
 
-fn write_termination_log(env: &HashMap<String, String>, e: &ValidationError) {
+pub(crate) fn write_termination_log(env: &HashMap<String, String>, e: &ValidationError) {
     let path = match env
         .get("DOCUCONF_TERMINATION_LOG")
         .filter(|s| !s.is_empty())

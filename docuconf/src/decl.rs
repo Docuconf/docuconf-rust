@@ -42,6 +42,51 @@ pub enum ItemKind {
     Int { min: i64, max: i64 },
 }
 
+/// How a `list` variable is written in the environment (SPEC §5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListEncoding {
+    /// Items joined by a separator (`a,b`).
+    Csv(String),
+    /// A JSON array (`["a","b"]`).
+    Json,
+    /// One variable per item: `NAME__0`, `NAME__1`, ...
+    Indexed,
+}
+
+impl ListEncoding {
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            ListEncoding::Csv(_) => "csv",
+            ListEncoding::Json => "json",
+            ListEncoding::Indexed => "indexed",
+        }
+    }
+}
+
+/// How a `duration` variable is written in the environment (SPEC §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurationEncoding {
+    /// Go syntax: `1m30s`.
+    Go,
+    /// ISO 8601: `PT90S`.
+    Iso8601,
+    /// A decimal number of seconds: `90`, `1.5`.
+    Seconds,
+    /// .NET `TimeSpan`: `00:01:30`, `1.02:03:04.5`.
+    Timespan,
+}
+
+impl DurationEncoding {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            DurationEncoding::Go => "go",
+            DurationEncoding::Iso8601 => "iso8601",
+            DurationEncoding::Seconds => "seconds",
+            DurationEncoding::Timespan => "timespan",
+        }
+    }
+}
+
 /// The contract type of a file input.
 #[derive(Debug, Clone)]
 pub enum FileKind {
@@ -109,6 +154,12 @@ pub(crate) struct VarDecl {
     /// 64-bit limit.
     pub item_min: Option<i64>,
     pub item_max: Option<i64>,
+    /// The wire encoding of a list: `json` for figment-bound structs, as the
+    /// contract says in contract-first mode.
+    pub list_encoding: ListEncoding,
+    /// The wire encoding of a duration: `go` (humantime) for figment-bound
+    /// structs, as the contract says in contract-first mode.
+    pub duration_encoding: DurationEncoding,
     pub group: Option<String>,
     pub examples: Vec<String>,
     pub deprecated: Option<String>,
@@ -281,7 +332,7 @@ pub(crate) fn is_abs_path(p: &str) -> bool {
         && !p.split('/').any(|seg| seg == "." || seg == "..")
 }
 
-fn compile_pattern(p: &str) -> Result<Regex, String> {
+pub(crate) fn compile_pattern(p: &str) -> Result<Regex, String> {
     Regex::new(p).map_err(|e| {
         let msg = e.to_string();
         let last = msg.lines().last().unwrap_or("").trim().to_string();
@@ -585,6 +636,8 @@ impl DeclCx {
             max_items: a.max_items,
             item_min,
             item_max,
+            list_encoding: ListEncoding::Json,
+            duration_encoding: DurationEncoding::Go,
             group: a.group.map(str::to_string),
             examples: a.examples.iter().map(|s| s.to_string()).collect(),
             deprecated: a.deprecated.map(str::to_string),

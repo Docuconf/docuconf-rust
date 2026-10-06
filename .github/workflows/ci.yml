@@ -20,8 +20,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The contract meta-schema (spec/cue) lives in docuconf-go; the export
-      # tests vet generated contracts against it.
+      # The contract meta-schema (spec/cue) and the shared conformance suite
+      # (conformance/cases.json) live in docuconf-go; the export tests vet
+      # generated contracts against the one, and tests/conformance.rs runs
+      # the other.
       - uses: actions/checkout@v4
         with:
           repository: docuconf/docuconf-go
@@ -53,6 +55,8 @@ jobs:
         env:
           DOCUCONF_SPEC_CUE: ${{ github.workspace }}/docuconf-go/spec/cue
           DOCUCONF_REQUIRE_VET: "1"
+          DOCUCONF_CONFORMANCE: ${{ github.workspace }}/docuconf-go/conformance/cases.json
+          DOCUCONF_REQUIRE_CONFORMANCE: "1"
 
       - name: Docs
         if: matrix.rust == 'stable'

@@ -6,8 +6,8 @@ use std::time::Duration;
 use figment::value::{Num, Value};
 
 use crate::__private::Lit;
-use crate::decl::{ItemKind, VarDecl, VarKind};
-use crate::duration::{format_go, parse_duration};
+use crate::decl::{ItemKind, ListEncoding, VarDecl, VarKind};
+use crate::duration::{format_go, parse_duration, parse_encoded};
 use crate::error::Code;
 
 /// A value of one of the contract types.
@@ -114,20 +114,24 @@ pub(crate) fn lit_bound(kind: &VarKind, l: &Lit) -> Result<Typed, String> {
     }
 }
 
-/// Parses the raw environment string for a variable (SPEC §5): values are
-/// never trimmed, booleans are `true`/`false` in any case, lists are JSON
-/// arrays (what figment's own `Env` provider parses), durations are Go
-/// syntax as `humantime` reads it.
-pub(crate) fn parse_wire(kind: &VarKind, raw: &str) -> Result<Typed, String> {
-    match kind {
+/// A parse failure: `invalid_type`, or `out_of_range` for an integer
+/// outside the 64-bit range (SPEC §5). The message never holds the value.
+pub(crate) type ParseError = (Code, String);
+
+/// Parses the raw environment string for a variable in its wire encoding
+/// (SPEC §5): values are never trimmed, booleans are `true`/`false` in any
+/// case, lists and durations follow the variable's encoding (`json` lists
+/// and `go` durations for a figment-bound struct, whatever the contract
+/// says in contract-first mode). An `indexed` list spans several
+/// variables; see [`parse_items`].
+pub(crate) fn parse_wire(var: &VarDecl, raw: &str) -> Result<Typed, ParseError> {
+    let invalid = |m: &str| (Code::InvalidType, m.to_string());
+    match &var.kind {
         VarKind::String | VarKind::Url | VarKind::Enum(_) => Ok(Typed::Str(raw.to_string())),
-        VarKind::Int { .. } => raw
-            .parse::<i64>()
-            .map(Typed::Int)
-            .map_err(|_| "is not a 64-bit integer".into()),
+        VarKind::Int { .. } => parse_int(raw).map(Typed::Int),
         VarKind::Float => match raw.parse::<f64>() {
             Ok(f) if f.is_finite() => Ok(Typed::Float(f)),
-            _ => Err("is not a finite number".into()),
+            _ => Err(invalid("is not a finite number")),
         },
         VarKind::Bool => {
             if raw.eq_ignore_ascii_case("true") {
@@ -135,34 +139,72 @@ pub(crate) fn parse_wire(kind: &VarKind, raw: &str) -> Result<Typed, String> {
             } else if raw.eq_ignore_ascii_case("false") {
                 Ok(Typed::Bool(false))
             } else {
-                Err("is not true or false".into())
+                Err(invalid("is not true or false"))
             }
         }
-        VarKind::Duration => parse_duration(raw).map(Typed::Dur),
-        VarKind::List(item) => {
-            let arr: Vec<serde_json::Value> = serde_json::from_str(raw)
-                .map_err(|_| "is not a JSON array such as [\"a\",\"b\"]".to_string())?;
-            arr.iter()
-                .map(|x| json_item(*item, x))
-                .collect::<Result<Vec<_>, _>>()
-                .map(Typed::List)
-        }
+        VarKind::Duration => parse_encoded(var.duration_encoding, raw)
+            .map(Typed::Dur)
+            .map_err(|e| (Code::InvalidType, e)),
+        VarKind::List(item) => match &var.list_encoding {
+            ListEncoding::Json => {
+                let arr: Vec<serde_json::Value> = serde_json::from_str(raw)
+                    .map_err(|_| invalid("is not a JSON array such as [\"a\",\"b\"]"))?;
+                arr.iter()
+                    .enumerate()
+                    .map(|(i, x)| json_item(*item, i, x))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Typed::List)
+            }
+            ListEncoding::Csv(sep) => parse_items(*item, raw.split(sep.as_str())),
+            ListEncoding::Indexed => parse_items(*item, [raw]),
+        },
         VarKind::Json { .. } => serde_json::from_str(raw)
             .map(Typed::Json)
-            .map_err(|_| "is not valid JSON".into()),
+            .map_err(|_| invalid("is not valid JSON")),
     }
 }
 
-fn json_item(item: ItemKind, x: &serde_json::Value) -> Result<Typed, String> {
+/// Parses list items given as separate strings (a split `csv` value, or the
+/// variables of an `indexed` list).
+pub(crate) fn parse_items<'a>(
+    item: ItemKind,
+    raws: impl IntoIterator<Item = &'a str>,
+) -> Result<Typed, ParseError> {
+    raws.into_iter()
+        .enumerate()
+        .map(|(i, raw)| match item {
+            ItemKind::String => Ok(Typed::Str(raw.to_string())),
+            ItemKind::Int { .. } => parse_int(raw)
+                .map(Typed::Int)
+                .map_err(|(c, m)| (c, format!("has item {i} that {m}"))),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Typed::List)
+}
+
+/// A base-10 integer.
+fn parse_int(raw: &str) -> Result<i64, ParseError> {
+    raw.parse::<i64>()
+        .map_err(|_| (Code::InvalidType, "is not a 64-bit integer".to_string()))
+}
+
+fn json_item(item: ItemKind, i: usize, x: &serde_json::Value) -> Result<Typed, ParseError> {
     match item {
         ItemKind::String => x
             .as_str()
             .map(|s| Typed::Str(s.to_string()))
-            .ok_or_else(|| "has an item that is not a string".to_string()),
-        ItemKind::Int { .. } => x
-            .as_i64()
-            .map(Typed::Int)
-            .ok_or_else(|| "has an item that is not an integer".to_string()),
+            .ok_or_else(|| {
+                (
+                    Code::InvalidType,
+                    format!("has item {i} that is not a string"),
+                )
+            }),
+        ItemKind::Int { .. } => x.as_i64().map(Typed::Int).ok_or_else(|| {
+            (
+                Code::InvalidType,
+                format!("has item {i} that is not a 64-bit integer"),
+            )
+        }),
     }
 }
 

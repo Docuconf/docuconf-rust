@@ -234,12 +234,45 @@ deterministic. `tests/golden/gateway.cue` is a golden export that uses every var
 Feature-flag-like names (`FF_`, `FEATURE_`, `ENABLE_`) produce a warning: flags that change without a rollout
 belong in a flag service (spec §10).
 
+## Contract-first mode
+
+`docuconf::Contract` validates an environment against a contract given as JSON (`cue export contract.cue`), with
+no Rust declaration, and returns typed values. Use it for a contract written by hand in CUE, or to check an
+environment in a tool. It parses every wire encoding of spec §5 (lists `csv` with any `separator`, `json` and
+`indexed` as `NAME__0`, `NAME__1`...; durations `go`, `iso8601`, `seconds` and `timespan`) and runs the same checks
+as a `#[derive(Docuconf)]` struct, so both accept exactly the same values:
+
+```rust
+let contract = docuconf::Contract::from_json(&std::fs::read_to_string("contract.json")?)?;
+let values = contract.load()?; // the process environment; or load_env([("PORT", "9090")]) in tests
+let port = values.get("PORT").and_then(|v| v.as_int());
+```
+
+`load()` reports every violation together and writes them to the termination log, as `docuconf::load` does;
+`load_env(...)` takes the whole environment as a map and writes nothing. `json` variables are checked against
+their `schema`. Profiles in the contract apply; file inputs and overlays are not loaded in this mode.
+
+## Conformance
+
+`tests/conformance.rs` runs docuconf-go's shared conformance suite (spec §12, `conformance/cases.json`) through
+contract-first mode. It reads `$DOCUCONF_CONFORMANCE`, or `../docuconf-go/conformance/cases.json` next to this
+repository, and is skipped when neither exists unless `DOCUCONF_REQUIRE_CONFORMANCE=1`:
+
+```sh
+DOCUCONF_CONFORMANCE=../docuconf-go/conformance/cases.json DOCUCONF_REQUIRE_CONFORMANCE=1 \
+  cargo test --test conformance -- --nocapture
+```
+
+Failures are reported by case id. The SDK supports both capability tags, `int64` (Rust holds every 64-bit
+integer) and `json-schema` (`json` values are checked with the `jsonschema` crate), so no case is skipped. CI runs
+the suite against docuconf-go `main`.
+
 ## Not yet supported
 
 - `reload: "watch"`, for file inputs and overlays (rejected at declaration time; files are read once at boot).
 - JKS keystores (PKCS#12 only).
 - Falling back from a variable to its `replaced_by` successor; deprecated variables only warn when set.
-- Markdown docs generation and contract-first loading (both SHOULDs in the spec).
+- Markdown docs generation (a SHOULD in the spec).
 
 ## Development
 
@@ -249,6 +282,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 UPDATE_GOLDEN=1 cargo test --test export   # accept a changed golden export
 ```
+
+See [Conformance](#conformance) for the shared suite.
 
 The export tests run `cue vet -c` against the meta-schema when `cue` (v0.17.1) is installed and the spec is at
 `../docuconf-go/spec/cue` or `$DOCUCONF_SPEC_CUE`; they skip otherwise (`DOCUCONF_REQUIRE_VET=1` makes that a

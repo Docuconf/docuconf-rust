@@ -56,7 +56,8 @@
 //!
 //! At boot, `let config: Config = docuconf::load()?;`.
 //! [`Loader`] adds the app's own config files, profiles and a platform
-//! config-file [`Overlay`].
+//! config-file [`Overlay`]. [`Contract`] validates an environment against a
+//! contract given as JSON, with no Rust declaration (contract-first mode).
 //!
 //! ## Types
 //!
@@ -101,9 +102,11 @@
 
 extern crate self as docuconf;
 
+pub mod contract;
 mod cue;
 mod decl;
 mod duration;
+mod env;
 mod error;
 mod export;
 mod files;
@@ -116,6 +119,7 @@ mod value;
 #[doc(hidden)]
 pub mod __private;
 
+pub use contract::Contract;
 pub use docuconf_derive::{Docuconf, DocuconfEnum};
 pub use duration::format_go;
 pub use error::{Code, DeclarationError, Error, ValidationError, Violation};
