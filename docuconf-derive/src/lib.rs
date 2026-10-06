@@ -207,6 +207,8 @@ struct DocAttrs {
     schemes: Vec<String>,
     min_items: Option<TokenStream2>,
     max_items: Option<TokenStream2>,
+    item_min: Option<TokenStream2>,
+    item_max: Option<TokenStream2>,
     group: Option<String>,
     examples: Vec<String>,
     deprecated: Option<String>,
@@ -341,6 +343,8 @@ fn parse_doc_attrs(attrs: &[Attribute]) -> syn::Result<DocAttrs> {
                 "schemes" => a.schemes = str_list(&meta)?,
                 "min_items" => a.min_items = Some(int_tokens(&meta)?),
                 "max_items" => a.max_items = Some(int_tokens(&meta)?),
+                "item_min" => a.item_min = Some(lit_tokens(&meta.value()?.parse()?)?),
+                "item_max" => a.item_max = Some(lit_tokens(&meta.value()?.parse()?)?),
                 "group" => a.group = Some(s(&meta)?),
                 "examples" => a.examples = str_list(&meta)?,
                 "deprecated" => a.deprecated = Some(s(&meta)?),
@@ -499,6 +503,8 @@ fn expand_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let schemes = &a.schemes;
         let min_items = opt_tokens(&a.min_items);
         let max_items = opt_tokens(&a.max_items);
+        let item_min = opt_tokens(&a.item_min);
+        let item_max = opt_tokens(&a.item_max);
         let group = opt_str(&a.group);
         let examples = &a.examples;
         let deprecated = opt_str(&a.deprecated);
@@ -540,6 +546,8 @@ fn expand_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     schemes: &[#(#schemes),*],
                     min_items: #min_items,
                     max_items: #max_items,
+                    item_min: #item_min,
+                    item_max: #item_max,
                     group: #group,
                     examples: &[#(#examples),*],
                     deprecated: #deprecated,

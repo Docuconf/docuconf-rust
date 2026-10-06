@@ -261,6 +261,12 @@ fn var_node(v: &VarDecl, file_default: Option<&Typed>, config_key: Option<&Strin
             if let Some(n) = v.max_items {
                 add("maxItems", Node::Int(n as i64));
             }
+            if let Some(n) = v.item_min {
+                add("itemMin", Node::Int(n));
+            }
+            if let Some(n) = v.item_max {
+                add("itemMax", Node::Int(n));
+            }
         }
         VarKind::Json { schema, .. } => add("schema", Node::from_json(schema)),
         VarKind::Bool => {}

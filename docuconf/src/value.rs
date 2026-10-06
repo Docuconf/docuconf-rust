@@ -323,16 +323,20 @@ pub(crate) fn check(var: &VarDecl, t: &Typed) -> Vec<(Code, String)> {
                     );
                 }
             }
-            if let ItemKind::Int { min, max } = item {
-                for x in items {
-                    if let Typed::Int(i) = x {
-                        if i < min || i > max {
-                            push(
-                                Code::OutOfRange,
-                                format!("has item {i} outside {min}..={max}"),
-                            );
-                        }
-                    }
+            if let ItemKind::Int { .. } = item {
+                let lo = var.item_min.unwrap_or(i64::MIN);
+                let hi = var.item_max.unwrap_or(i64::MAX);
+                // One violation per variable: the first item out of bounds.
+                if let Some(i) = items.iter().find_map(|x| match x {
+                    Typed::Int(i) if *i < lo || *i > hi => Some(*i),
+                    _ => None,
+                }) {
+                    let m = if i < lo {
+                        format!("has item {i}, below itemMin {lo}")
+                    } else {
+                        format!("has item {i}, above itemMax {hi}")
+                    };
+                    push(Code::OutOfRange, m);
                 }
             }
         }

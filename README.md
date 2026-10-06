@@ -75,7 +75,7 @@ that is not an `Option` and has no `default` is required. The Rust type picks th
 | `std::time::Duration` + `#[serde(with = "docuconf::humantime_serde")]` | `duration`, encoding `go` |
 | `url::Url` | `url` |
 | `#[derive(DocuconfEnum)]` enum | `enum`, values after serde renames |
-| `Vec<String>`, `Vec<u16>`... | `list`, encoding `json` |
+| `Vec<String>`, `Vec<u16>`... | `list`, encoding `json`; an int item type narrower than 64 bits exports its range as `itemMin`/`itemMax` |
 | `docuconf::Json<T>` (`T: JsonSchema`) | `json`, with the schema from `T` |
 | `docuconf::Secret<T>` | `T` with `secret: true`; `Debug` prints `Secret(***)` |
 | `Option<T>` | optional |
@@ -88,11 +88,23 @@ that is not an `Option` and has no `default` is required. The Rust type picks th
 | `BinaryFile` | file `binary` |
 
 Variable attributes: `default`, `required`, `secret`, `min`, `max`, `min_length`, `max_length`, `pattern` (RE2,
-matches anywhere: anchor with `^`/`$`), `values`, `schemes`, `min_items`, `max_items`, `group`, `examples`,
+matches anywhere: anchor with `^`/`$`), `values`, `schemes`, `min_items`, `max_items`, `item_min`, `item_max`, `group`, `examples`,
 `deprecated`, `replaced_by`, `config_key`, `env`, `description`, `skip`. File attributes: `path` (required),
 `name` (input name; default is the field name with `-`), `path_env`, `reload` (only `"restart"`; `"watch"` is not
 implemented yet and is rejected), `max_size` (`65536` or `"64Ki"`), `required`, `secret`, `group`, `deprecated`,
-plus the type-specific ones above. Mistakes (a bad name, a default outside its own range, a pattern with
+plus the type-specific ones above.
+
+`item_min` and `item_max` bound each item of an int list, and an item outside them is `out_of_range` at boot. They
+are narrowed to the item type, as `min`/`max` are for an int variable, so `Vec<u16>` always exports
+`itemMin: 0, itemMax: 65535` or tighter:
+
+```rust
+/// Shard ids this instance owns.
+#[docuconf(item_min = 0, item_max = 1023)]
+pub shards: Vec<u16>,
+```
+
+Mistakes (a bad name, a default outside its own range, a pattern with
 lookaround, a file mounted over `/etc`) are reported by `docuconf::check_declaration::<Config>()`, by export and
 by load.
 

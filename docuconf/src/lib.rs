@@ -69,7 +69,7 @@
 //! | `std::time::Duration` with `#[serde(with = "docuconf::humantime_serde")]` | `duration`, encoding `go` |
 //! | `url::Url` | `url` |
 //! | a `#[derive(DocuconfEnum)]` enum | `enum` |
-//! | `Vec<String>`, `Vec<int>` | `list`, encoding `json` |
+//! | `Vec<String>`, `Vec<int>` | `list`, encoding `json`, with an int item type's range as `itemMin`/`itemMax` (narrow it with `item_min`/`item_max`) |
 //! | [`Json<T>`] | `json`, schema from `T: JsonSchema` |
 //! | [`Secret<T>`] | `T`, with `secret: true` |
 //! | `Option<T>` | `T`, optional |

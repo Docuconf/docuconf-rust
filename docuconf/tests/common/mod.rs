@@ -58,8 +58,12 @@ pub struct Gateway {
     pub allowed_origins: Vec<String>,
 
     /// Extra ports to listen on.
-    #[docuconf(max_items = 4)]
+    #[docuconf(max_items = 4, item_min = 1)]
     pub extra_ports: Option<Vec<u16>>,
+
+    /// Shard ids this instance owns.
+    #[docuconf(item_min = 0, item_max = 1023)]
+    pub shards: Option<Vec<i64>>,
 
     /// Stripe API base URL.
     #[docuconf(default = "https://api.stripe.com", schemes("https"))]

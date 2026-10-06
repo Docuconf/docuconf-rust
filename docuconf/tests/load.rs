@@ -146,6 +146,27 @@ fn out_of_range() {
 }
 
 #[test]
+fn list_items_outside_their_bounds() {
+    let mut w = World::new();
+    w.set("SHARDS", "[0,1024]").set("EXTRA_PORTS", "[8443,0]");
+    let v = violations(&w);
+    assert_eq!(v.codes_for("SHARDS"), [Code::OutOfRange]);
+    assert_eq!(v.codes_for("EXTRA_PORTS"), [Code::OutOfRange]);
+    let text = v.to_string();
+    assert!(text.contains("has item 1024, above itemMax 1023"), "{text}");
+    assert!(text.contains("has item 0, below itemMin 1"), "{text}");
+
+    // Beyond the item type (u16) without a user bound.
+    let mut w = World::new();
+    w.set("EXTRA_PORTS", "[70000]");
+    assert_eq!(violations(&w).codes_for("EXTRA_PORTS"), [Code::OutOfRange]);
+
+    let mut w = World::new();
+    w.set("SHARDS", "[0,1023]");
+    assert_eq!(w.load().unwrap().shards, Some(vec![0, 1023]));
+}
+
+#[test]
 fn floats_reject_nan_and_infinity() {
     for bad in ["NaN", "inf", "-infinity"] {
         let mut w = World::new();
