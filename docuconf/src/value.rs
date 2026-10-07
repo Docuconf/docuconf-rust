@@ -87,22 +87,34 @@ pub(crate) fn lit_value(kind: &VarKind, l: &Lit) -> Result<Typed, String> {
                 (ItemKind::Int { .. }, Lit::Int(i)) => i64::try_from(*i)
                     .map(Typed::Int)
                     .map_err(|_| format!("{i} is outside the 64-bit integer range")),
-                _ => Err(format!("list item {l:?} does not match the item type")),
+                _ => Err(format!(
+                    "list item {} is not {}",
+                    l.show(),
+                    match item {
+                        ItemKind::String => "a string",
+                        ItemKind::Int { .. } => "an integer",
+                    }
+                )),
             })
             .collect::<Result<Vec<_>, _>>()
             .map(Typed::List),
         (VarKind::Json { .. }, Lit::Str(s)) => serde_json::from_str(s)
             .map(Typed::Json)
             .map_err(|e| format!("is not valid JSON: {e}")),
-        (k, l) => Err(format!(
-            "{l:?} is not a {} value{}",
-            k.type_name(),
-            match k {
-                VarKind::Duration => " (write it as a string such as \"30s\")",
-                VarKind::Json { .. } => " (write it as a JSON string)",
-                _ => "",
-            }
-        )),
+        (k, l) => Err(format!("{} is not {}", l.show(), expected(k))),
+    }
+}
+
+/// What a literal for a variable of `kind` must look like, for messages.
+fn expected(kind: &VarKind) -> &'static str {
+    match kind {
+        VarKind::String | VarKind::Url | VarKind::Enum(_) => "a string",
+        VarKind::Int { .. } => "an integer",
+        VarKind::Float => "a number",
+        VarKind::Bool => "true or false",
+        VarKind::Duration => "a duration (write it as a string such as \"30s\")",
+        VarKind::List(_) => "a list (write it as [\"a\", \"b\"])",
+        VarKind::Json { .. } => "JSON (write it as a string such as r#\"{\"a\":1}\"#)",
     }
 }
 
@@ -193,7 +205,7 @@ fn parse_int(raw: &str) -> Result<i64, ParseError> {
                 "is outside the 64-bit integer range".to_string(),
             )
         } else {
-            (Code::InvalidType, "is not a 64-bit integer".to_string())
+            (Code::InvalidType, "is not an integer".to_string())
         }
     })
 }
@@ -226,7 +238,7 @@ fn json_item(item: ItemKind, i: usize, x: &serde_json::Value) -> Result<Typed, P
             } else {
                 (
                     Code::InvalidType,
-                    format!("has item {i} that is not a 64-bit integer"),
+                    format!("has item {i} that is not an integer"),
                 )
             })
         }
