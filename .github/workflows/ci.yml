@@ -97,7 +97,8 @@ jobs:
         working-directory: examples/orders
         run: |
           cargo run --locked --quiet -p orders -- export "$RUNNER_TEMP/contract.cue"
-          diff -u contract.cue "$RUNNER_TEMP/contract.cue" \
+          # Ignores metadata.generator.version, which release PRs bump.
+          ../../scripts/check-generated.sh --files contract.cue "$RUNNER_TEMP/contract.cue" \
             || { echo "contract.cue is stale: run 'cargo run -p orders -- export contract.cue' in examples/orders"; exit 1; }
 
       - name: Vet the contract

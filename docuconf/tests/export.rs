@@ -15,6 +15,15 @@ use serde::Deserialize;
 
 const GOLDEN: &str = "tests/golden/gateway.cue";
 
+/// Replaces the value of `metadata.generator.version`. It is the crate version,
+/// which every release PR bumps, so golden comparisons ignore it.
+fn without_generator_version(cue: &str) -> String {
+    regex::Regex::new(r#"(generator:\s*\{[^{}]*?\bversion:\s*)"[^"]*""#)
+        .unwrap()
+        .replace_all(cue, r#"${1}"<generator-version>""#)
+        .into_owned()
+}
+
 #[test]
 fn export_matches_golden() {
     let out = docuconf::export::<Gateway>(&Meta::new("gateway")).unwrap();
@@ -25,11 +34,31 @@ fn export_matches_golden() {
     }
     let want = std::fs::read_to_string(&path).unwrap();
     assert_eq!(
-        want, out,
+        without_generator_version(&want),
+        without_generator_version(&out),
         "export changed; run UPDATE_GOLDEN=1 cargo test --test export to accept"
     );
     let again = docuconf::export::<Gateway>(&Meta::new("gateway")).unwrap();
     assert_eq!(out, again, "export must be deterministic");
+}
+
+#[test]
+fn golden_comparison_ignores_only_the_generator_version() {
+    let out = docuconf::export::<Gateway>(&Meta::new("gateway")).unwrap();
+    let bumped = regex::Regex::new(r#"(\bversion:\s*)"[^"]*""#)
+        .unwrap()
+        .replace(&out, r#"${1}"99.0.0""#)
+        .into_owned();
+    assert_ne!(bumped, out);
+    assert_eq!(
+        without_generator_version(&bumped),
+        without_generator_version(&out)
+    );
+    let renamed = out.replace("HTTP listen port", "port");
+    assert_ne!(
+        without_generator_version(&renamed),
+        without_generator_version(&out)
+    );
 }
 
 #[test]
