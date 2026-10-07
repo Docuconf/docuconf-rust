@@ -9,6 +9,9 @@ JSON/YAML/TOML config files, text and binary files.
 Part of [docuconf](https://github.com/docuconf). See the
 [specification](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md).
 
+**Example:** [`examples/orders/`](https://github.com/docuconf/docuconf-rust/tree/main/examples/orders), a small HTTP service with its declaration, exported
+contract and boot-time errors.
+
 > **Status:** `0.1.0`. The contract format is a draft (`v1alpha1`) and the API may change.
 
 ## Why figment
