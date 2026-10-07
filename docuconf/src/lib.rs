@@ -68,10 +68,10 @@
 //! | `f32`, `f64` | `float` |
 //! | `bool` | `bool` |
 //! | `std::time::Duration` with `#[serde(with = "docuconf::humantime_serde")]` | `duration`, encoding `go` |
-//! | `url::Url` | `url` |
+//! | `url::Url` | `url` (`max_length`) |
 //! | a `#[derive(DocuconfEnum)]` enum | `enum` |
-//! | `Vec<String>`, `Vec<int>` | `list`, encoding `json`, with an int item type's range as `itemMin`/`itemMax` (narrow it with `item_min`/`item_max`) |
-//! | [`Json<T>`] | `json`, schema from `T: JsonSchema` |
+//! | `Vec<String>`, `Vec<int>` | `list`, encoding `json`, with an int item type's range as `itemMin`/`itemMax` (narrow it with `item_min`/`item_max`); string items take `item_min_length`/`item_max_length` |
+//! | [`Json<T>`] | `json`, schema from `T: JsonSchema` (`max_length` on its wire string) |
 //! | [`Secret<T>`] | `T`, with `secret: true` |
 //! | `Option<T>` | `T`, optional |
 //! | [`ConfigFile<T>`], [`TlsKeyPair`], [`CaBundle`], [`Keystore`], [`TextFile`], [`BinaryFile`] | file inputs |

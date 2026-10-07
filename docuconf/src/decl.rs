@@ -154,6 +154,10 @@ pub(crate) struct VarDecl {
     /// 64-bit limit.
     pub item_min: Option<i64>,
     pub item_max: Option<i64>,
+    /// Bounds on the length of each item of a `string` list, in characters
+    /// (Unicode code points).
+    pub item_min_length: Option<u64>,
+    pub item_max_length: Option<u64>,
     /// The wire encoding of a list: `json` for figment-bound structs, as the
     /// contract says in contract-first mode.
     pub list_encoding: ListEncoding,
@@ -453,18 +457,25 @@ impl DeclCx {
         let allowed: &[&str] = match &kind {
             VarKind::String => &["min_length", "max_length", "pattern"],
             VarKind::Int { .. } | VarKind::Float | VarKind::Duration => &["min", "max"],
-            VarKind::Url => &["schemes", "url"],
+            VarKind::Url => &["schemes", "url", "max_length"],
             VarKind::Enum(_) => &["values"],
             VarKind::List(ItemKind::Int { .. }) => {
                 &["min_items", "max_items", "item_min", "item_max"]
             }
-            VarKind::List(ItemKind::String) => &["min_items", "max_items"],
-            VarKind::Bool | VarKind::Json { .. } => &[],
+            VarKind::List(ItemKind::String) => &[
+                "min_items",
+                "max_items",
+                "item_min_length",
+                "item_max_length",
+            ],
+            VarKind::Json { .. } => &["max_length"],
+            VarKind::Bool => &[],
         };
         for attr in a.set {
             if !COMMON_ATTRS.contains(attr) && !allowed.contains(attr) {
                 let what = match &kind {
                     VarKind::List(ItemKind::String) => "list of strings",
+                    VarKind::List(ItemKind::Int { .. }) => "list of ints",
                     k => k.type_name(),
                 };
                 problems.push(format!(
@@ -593,6 +604,19 @@ impl DeclCx {
             item_max = (hi != i64::MAX).then_some(hi);
         }
 
+        if let (Some(lo), Some(hi)) = (a.min_length, a.max_length) {
+            if lo > hi {
+                problems.push(format!("min_length {lo} is above max_length {hi}"));
+            }
+        }
+        if let (Some(lo), Some(hi)) = (a.item_min_length, a.item_max_length) {
+            if lo > hi {
+                problems.push(format!(
+                    "item_min_length {lo} is above item_max_length {hi}"
+                ));
+            }
+        }
+
         let pattern = match a.pattern {
             Some(p) => match compile_pattern(p) {
                 Ok(re) => Some((p.to_string(), re)),
@@ -636,6 +660,8 @@ impl DeclCx {
             max_items: a.max_items,
             item_min,
             item_max,
+            item_min_length: a.item_min_length,
+            item_max_length: a.item_max_length,
             list_encoding: ListEncoding::Json,
             duration_encoding: DurationEncoding::Go,
             group: a.group.map(str::to_string),
