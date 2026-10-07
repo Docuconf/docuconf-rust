@@ -10,8 +10,6 @@ Part of [docuconf](https://github.com/docuconf). See the
 [specification](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md).
 
 > **Status:** `0.1.0`. The contract format is a draft (`v1alpha1`) and the API may change.
->
-> **Licence:** pending. There is no LICENSE file yet, so the crates are not yet licensed for reuse.
 
 ## Why figment
 
@@ -77,7 +75,7 @@ that is not an `Option` and has no `default` is required. The Rust type picks th
 | `std::time::Duration` + `#[serde(with = "docuconf::humantime_serde")]` | `duration`, encoding `go` |
 | `url::Url` | `url` |
 | `#[derive(DocuconfEnum)]` enum | `enum`, values after serde renames |
-| `Vec<String>`, `Vec<u16>`... | `list`, encoding `json` |
+| `Vec<String>`, `Vec<u16>`... | `list`, encoding `json`; an int item type narrower than 64 bits exports its range as `itemMin`/`itemMax` |
 | `docuconf::Json<T>` (`T: JsonSchema`) | `json`, with the schema from `T` |
 | `docuconf::Secret<T>` | `T` with `secret: true`; `Debug` prints `Secret(***)` |
 | `Option<T>` | optional |
@@ -90,11 +88,23 @@ that is not an `Option` and has no `default` is required. The Rust type picks th
 | `BinaryFile` | file `binary` |
 
 Variable attributes: `default`, `required`, `secret`, `min`, `max`, `min_length`, `max_length`, `pattern` (RE2,
-matches anywhere: anchor with `^`/`$`), `values`, `schemes`, `min_items`, `max_items`, `group`, `examples`,
+matches anywhere: anchor with `^`/`$`), `values`, `schemes`, `min_items`, `max_items`, `item_min`, `item_max`, `group`, `examples`,
 `deprecated`, `replaced_by`, `config_key`, `env`, `description`, `skip`. File attributes: `path` (required),
 `name` (input name; default is the field name with `-`), `path_env`, `reload` (only `"restart"`; `"watch"` is not
 implemented yet and is rejected), `max_size` (`65536` or `"64Ki"`), `required`, `secret`, `group`, `deprecated`,
-plus the type-specific ones above. Mistakes (a bad name, a default outside its own range, a pattern with
+plus the type-specific ones above.
+
+`item_min` and `item_max` bound each item of an int list, and an item outside them is `out_of_range` at boot. They
+are narrowed to the item type, as `min`/`max` are for an int variable, so `Vec<u16>` always exports
+`itemMin: 0, itemMax: 65535` or tighter:
+
+```rust
+/// Shard ids this instance owns.
+#[docuconf(item_min = 0, item_max = 1023)]
+pub shards: Vec<u16>,
+```
+
+Mistakes (a bad name, a default outside its own range, a pattern with
 lookaround, a file mounted over `/etc`) are reported by `docuconf::check_declaration::<Config>()`, by export and
 by load.
 
@@ -224,12 +234,45 @@ deterministic. `tests/golden/gateway.cue` is a golden export that uses every var
 Feature-flag-like names (`FF_`, `FEATURE_`, `ENABLE_`) produce a warning: flags that change without a rollout
 belong in a flag service (spec §10).
 
+## Contract-first mode
+
+`docuconf::Contract` validates an environment against a contract given as JSON (`cue export contract.cue`), with
+no Rust declaration, and returns typed values. Use it for a contract written by hand in CUE, or to check an
+environment in a tool. It parses every wire encoding of spec §5 (lists `csv` with any `separator`, `json` and
+`indexed` as `NAME__0`, `NAME__1`...; durations `go`, `iso8601`, `seconds` and `timespan`) and runs the same checks
+as a `#[derive(Docuconf)]` struct, so both accept exactly the same values:
+
+```rust
+let contract = docuconf::Contract::from_json(&std::fs::read_to_string("contract.json")?)?;
+let values = contract.load()?; // the process environment; or load_env([("PORT", "9090")]) in tests
+let port = values.get("PORT").and_then(|v| v.as_int());
+```
+
+`load()` reports every violation together and writes them to the termination log, as `docuconf::load` does;
+`load_env(...)` takes the whole environment as a map and writes nothing. `json` variables are checked against
+their `schema`. Profiles in the contract apply; file inputs and overlays are not loaded in this mode.
+
+## Conformance
+
+`tests/conformance.rs` runs docuconf-go's shared conformance suite (spec §12, `conformance/cases.json`) through
+contract-first mode. It reads `$DOCUCONF_CONFORMANCE`, or `../docuconf-go/conformance/cases.json` next to this
+repository, and is skipped when neither exists unless `DOCUCONF_REQUIRE_CONFORMANCE=1`:
+
+```sh
+DOCUCONF_CONFORMANCE=../docuconf-go/conformance/cases.json DOCUCONF_REQUIRE_CONFORMANCE=1 \
+  cargo test --test conformance -- --nocapture
+```
+
+Failures are reported by case id. The SDK supports both capability tags, `int64` (Rust holds every 64-bit
+integer) and `json-schema` (`json` values are checked with the `jsonschema` crate), so no case is skipped. CI runs
+the suite against docuconf-go `main`.
+
 ## Not yet supported
 
 - `reload: "watch"`, for file inputs and overlays (rejected at declaration time; files are read once at boot).
 - JKS keystores (PKCS#12 only).
 - Falling back from a variable to its `replaced_by` successor; deprecated variables only warn when set.
-- Markdown docs generation and contract-first loading (both SHOULDs in the spec).
+- Markdown docs generation (a SHOULD in the spec).
 
 ## Development
 
@@ -240,6 +283,12 @@ cargo fmt --all --check
 UPDATE_GOLDEN=1 cargo test --test export   # accept a changed golden export
 ```
 
+See [Conformance](#conformance) for the shared suite.
+
 The export tests run `cue vet -c` against the meta-schema when `cue` (v0.17.1) is installed and the spec is at
 `../docuconf-go/spec/cue` or `$DOCUCONF_SPEC_CUE`; they skip otherwise (`DOCUCONF_REQUIRE_VET=1` makes that a
 failure). Minimum supported Rust version: **1.89** (set by the `aes` crate under `p12-keystore`).
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

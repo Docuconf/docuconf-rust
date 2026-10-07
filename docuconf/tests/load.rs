@@ -99,6 +99,42 @@ fn values_are_never_trimmed() {
 }
 
 #[test]
+fn a_value_that_is_not_utf8_is_invalid_type_not_missing() {
+    use std::os::unix::ffi::OsStrExt;
+
+    // Read from the process environment, where a value need not be UTF-8.
+    // It used to be dropped, so a required variable looked unset.
+    #[derive(Debug, Deserialize, Docuconf)]
+    #[allow(dead_code)]
+    struct Cfg {
+        /// Port read from a non-UTF-8 value.
+        docuconf_test_non_utf8_port: u16,
+        /// Optional name read from a non-UTF-8 value.
+        docuconf_test_non_utf8_name: Option<String>,
+    }
+    std::env::set_var(
+        "DOCUCONF_TEST_NON_UTF8_PORT",
+        std::ffi::OsStr::from_bytes(b"80\xff"),
+    );
+    std::env::set_var(
+        "DOCUCONF_TEST_NON_UTF8_NAME",
+        std::ffi::OsStr::from_bytes(b"caf\xe9"),
+    );
+    let e = docuconf::Loader::<Cfg>::new()
+        .termination_log(false)
+        .load()
+        .unwrap_err();
+    let v = &e.violations();
+    assert_eq!(v.len(), 2, "{e}");
+    for x in v.iter() {
+        assert_eq!(x.code, Code::InvalidType, "{e}");
+        assert!(x.message.contains("not valid UTF-8"), "{e}");
+    }
+    std::env::remove_var("DOCUCONF_TEST_NON_UTF8_PORT");
+    std::env::remove_var("DOCUCONF_TEST_NON_UTF8_NAME");
+}
+
+#[test]
 fn strings_that_look_like_numbers_stay_strings() {
     // figment's Env provider would read these as a number and a bool.
     let mut w = World::new();
@@ -120,7 +156,13 @@ fn bad_int() {
     assert_eq!(v.violations[0].input, "PORT");
     assert!(v.violations[0].message.contains("\"80x\""), "{v}");
 
+    // An integer outside the 64-bit range is out_of_range, not mistyped
+    // (SPEC §5).
     w.set("PORT", "9223372036854775808");
+    assert_eq!(violations(&w).codes_for("PORT"), [Code::OutOfRange]);
+    w.set("PORT", "-99999999999999999999");
+    assert_eq!(violations(&w).codes_for("PORT"), [Code::OutOfRange]);
+    w.set("PORT", "--1");
     assert_eq!(violations(&w).codes_for("PORT"), [Code::InvalidType]);
     w.set("PORT", "1.5");
     assert_eq!(violations(&w).codes_for("PORT"), [Code::InvalidType]);
@@ -143,6 +185,34 @@ fn out_of_range() {
     assert_eq!(v.codes_for("REQUEST_TIMEOUT"), [Code::OutOfRange]);
     assert_eq!(v.codes_for("TRACE_SAMPLE_RATIO"), [Code::OutOfRange]);
     assert!(v.to_string().contains("10m is above max 5m"), "{v}");
+}
+
+#[test]
+fn list_items_outside_their_bounds() {
+    let mut w = World::new();
+    w.set("SHARDS", "[0,1024]").set("EXTRA_PORTS", "[8443,0]");
+    let v = violations(&w);
+    assert_eq!(v.codes_for("SHARDS"), [Code::OutOfRange]);
+    assert_eq!(v.codes_for("EXTRA_PORTS"), [Code::OutOfRange]);
+    let text = v.to_string();
+    assert!(text.contains("has item 1024, above itemMax 1023"), "{text}");
+    assert!(text.contains("has item 0, below itemMin 1"), "{text}");
+
+    // Beyond the 64-bit range.
+    let mut w = World::new();
+    w.set("SHARDS", "[1,99999999999999999999]");
+    assert_eq!(violations(&w).codes_for("SHARDS"), [Code::OutOfRange]);
+    w.set("SHARDS", "[1,1.5]");
+    assert_eq!(violations(&w).codes_for("SHARDS"), [Code::InvalidType]);
+
+    // Beyond the item type (u16) without a user bound.
+    let mut w = World::new();
+    w.set("EXTRA_PORTS", "[70000]");
+    assert_eq!(violations(&w).codes_for("EXTRA_PORTS"), [Code::OutOfRange]);
+
+    let mut w = World::new();
+    w.set("SHARDS", "[0,1023]");
+    assert_eq!(w.load().unwrap().shards, Some(vec![0, 1023]));
 }
 
 #[test]

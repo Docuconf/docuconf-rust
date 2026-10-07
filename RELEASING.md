@@ -9,8 +9,8 @@ Releases are published by `.github/workflows/release.yml` when a version tag is 
 OIDC through `rust-lang/crates-io-auth-action`, which exchanges it for a short-lived publish token, so no
 crates.io token is stored in the repository.
 
-> The licence is still pending. Add a `LICENSE` file and a `license` field to both `Cargo.toml` files before the
-> first publish; crates.io requires one of `license` or `license-file`.
+Both crates are licensed MIT (`license = "MIT"` in the workspace `Cargo.toml`), and each crate directory carries
+a copy of `LICENSE` so it is packaged with the crate.
 
 ## One-time setup
 

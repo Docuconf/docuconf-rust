@@ -100,6 +100,12 @@ fn declaration_errors() {
         ks: docuconf::Keystore,
         /// Not secret, so not a keystore password.
         lower_not_secret: String,
+        /// Item bounds only apply to int lists.
+        #[docuconf(item_min = 1)]
+        names: Vec<String>,
+        /// Item bounds must leave a range.
+        #[docuconf(item_min = 10, item_max = 5)]
+        ids: Vec<i32>,
     }
     let err = docuconf::check_declaration::<Bad>().unwrap_err();
     let all = err.problems.join("\n");
@@ -115,6 +121,8 @@ fn declaration_errors() {
         "file input ca (Bad.ca): would be mounted at /etc",
         "file input notes (Bad.notes): reload = \"watch\" is not implemented",
         "file input ks (Bad.ks): password_var LOWER_NOT_SECRET must be a secret variable",
+        "NAMES (Bad.names): attribute `item_min` does not apply to a list of strings variable",
+        "IDS (Bad.ids): item_min 10 is above item_max 5",
     ] {
         assert!(all.contains(want), "missing {want:?} in\n{all}");
     }
@@ -125,6 +133,56 @@ fn declaration_errors() {
         .load()
         .unwrap_err();
     assert!(matches!(e, Error::Declaration(_)));
+}
+
+#[test]
+fn list_item_bounds_are_exported_within_the_item_type() {
+    #[derive(Debug, Deserialize, Docuconf)]
+    #[allow(dead_code)]
+    struct Lists {
+        /// Narrow items get their type's range.
+        a: Vec<u16>,
+        /// Signed 32-bit items.
+        b: Vec<i32>,
+        /// User bounds inside the type's range.
+        #[docuconf(item_min = -5, item_max = 100)]
+        c: Vec<i8>,
+        /// User bounds wider than the type are narrowed to it.
+        #[docuconf(item_min = -1000, item_max = 1000)]
+        d: Vec<u8>,
+        /// 64-bit items have no implicit bounds.
+        e: Vec<i64>,
+    }
+    let out = docuconf::export::<Lists>(&Meta::new("lists")).unwrap();
+    let block = |name: &str| {
+        let start = out.find(&format!("\t\t{name}: {{")).unwrap();
+        let end = start + out[start..].find("\t\t}").unwrap();
+        out[start..end].to_string()
+    };
+    assert!(
+        block("A").contains("itemMin:     0\n") && block("A").contains("itemMax:     65535\n"),
+        "{out}"
+    );
+    assert!(
+        block("B").contains("itemMin:     -2147483648\n")
+            && block("B").contains("itemMax:     2147483647\n"),
+        "{out}"
+    );
+    assert!(
+        block("C").contains("itemMin:     -5\n") && block("C").contains("itemMax:     100\n"),
+        "{out}"
+    );
+    assert!(
+        block("D").contains("itemMin:     0\n") && block("D").contains("itemMax:     255\n"),
+        "{out}"
+    );
+    assert!(
+        !block("E").contains("itemMin") && !block("E").contains("itemMax"),
+        "{out}"
+    );
+    if let Some(res) = cue_vet(&out) {
+        res.unwrap_or_else(|e| panic!("cue vet failed:\n{e}\n{out}"));
+    }
 }
 
 #[test]

@@ -9,6 +9,7 @@ rust-version = "1.89"
 repository = "https://github.com/docuconf/docuconf-rust"
 homepage = "https://docuconf.dev"
 authors = ["docuconf contributors"]
+license = "MIT"
 
 # Certificate and keystore tests run much faster with optimised dependencies.
 [profile.dev.package."*"]

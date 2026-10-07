@@ -42,6 +42,51 @@ pub enum ItemKind {
     Int { min: i64, max: i64 },
 }
 
+/// How a `list` variable is written in the environment (SPEC §5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListEncoding {
+    /// Items joined by a separator (`a,b`).
+    Csv(String),
+    /// A JSON array (`["a","b"]`).
+    Json,
+    /// One variable per item: `NAME__0`, `NAME__1`, ...
+    Indexed,
+}
+
+impl ListEncoding {
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            ListEncoding::Csv(_) => "csv",
+            ListEncoding::Json => "json",
+            ListEncoding::Indexed => "indexed",
+        }
+    }
+}
+
+/// How a `duration` variable is written in the environment (SPEC §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurationEncoding {
+    /// Go syntax: `1m30s`.
+    Go,
+    /// ISO 8601: `PT90S`.
+    Iso8601,
+    /// A decimal number of seconds: `90`, `1.5`.
+    Seconds,
+    /// .NET `TimeSpan`: `00:01:30`, `1.02:03:04.5`.
+    Timespan,
+}
+
+impl DurationEncoding {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            DurationEncoding::Go => "go",
+            DurationEncoding::Iso8601 => "iso8601",
+            DurationEncoding::Seconds => "seconds",
+            DurationEncoding::Timespan => "timespan",
+        }
+    }
+}
+
 /// The contract type of a file input.
 #[derive(Debug, Clone)]
 pub enum FileKind {
@@ -104,6 +149,17 @@ pub(crate) struct VarDecl {
     pub schemes: Vec<String>,
     pub min_items: Option<u64>,
     pub max_items: Option<u64>,
+    /// Bounds on each item of an `int` list: the user's `item_min` /
+    /// `item_max` narrowed to the item type's range. `None` when it is the
+    /// 64-bit limit.
+    pub item_min: Option<i64>,
+    pub item_max: Option<i64>,
+    /// The wire encoding of a list: `json` for figment-bound structs, as the
+    /// contract says in contract-first mode.
+    pub list_encoding: ListEncoding,
+    /// The wire encoding of a duration: `go` (humantime) for figment-bound
+    /// structs, as the contract says in contract-first mode.
+    pub duration_encoding: DurationEncoding,
     pub group: Option<String>,
     pub examples: Vec<String>,
     pub deprecated: Option<String>,
@@ -276,7 +332,7 @@ pub(crate) fn is_abs_path(p: &str) -> bool {
         && !p.split('/').any(|seg| seg == "." || seg == "..")
 }
 
-fn compile_pattern(p: &str) -> Result<Regex, String> {
+pub(crate) fn compile_pattern(p: &str) -> Result<Regex, String> {
     Regex::new(p).map_err(|e| {
         let msg = e.to_string();
         let last = msg.lines().last().unwrap_or("").trim().to_string();
@@ -399,14 +455,20 @@ impl DeclCx {
             VarKind::Int { .. } | VarKind::Float | VarKind::Duration => &["min", "max"],
             VarKind::Url => &["schemes", "url"],
             VarKind::Enum(_) => &["values"],
-            VarKind::List(_) => &["min_items", "max_items"],
+            VarKind::List(ItemKind::Int { .. }) => {
+                &["min_items", "max_items", "item_min", "item_max"]
+            }
+            VarKind::List(ItemKind::String) => &["min_items", "max_items"],
             VarKind::Bool | VarKind::Json { .. } => &[],
         };
         for attr in a.set {
             if !COMMON_ATTRS.contains(attr) && !allowed.contains(attr) {
+                let what = match &kind {
+                    VarKind::List(ItemKind::String) => "list of strings",
+                    k => k.type_name(),
+                };
                 problems.push(format!(
-                    "attribute `{attr}` does not apply to a {} variable",
-                    kind.type_name()
+                    "attribute `{attr}` does not apply to a {what} variable"
                 ));
             }
         }
@@ -497,6 +559,40 @@ impl DeclCx {
             max = bound(a.max, "max", &mut problems);
         }
 
+        // Item bounds of an int list, narrowed to the item type the same way.
+        let (mut item_min, mut item_max) = (None, None);
+        if let VarKind::List(ItemKind::Int {
+            min: tmin,
+            max: tmax,
+        }) = kind
+        {
+            let item_bound = |l: Option<Lit>, which: &str, problems: &mut Vec<String>| match l {
+                None => None,
+                Some(Lit::Int(i)) => match i64::try_from(i) {
+                    Ok(v) => Some(v),
+                    Err(_) => {
+                        problems.push(format!("{which}: {i} is outside the 64-bit integer range"));
+                        None
+                    }
+                },
+                Some(other) => {
+                    problems.push(format!("{which}: {other:?} is not an integer"));
+                    None
+                }
+            };
+            let umin = item_bound(a.item_min, "item_min", &mut problems);
+            let umax = item_bound(a.item_max, "item_max", &mut problems);
+            let lo = umin.map_or(tmin, |v| v.max(tmin));
+            let hi = umax.map_or(tmax, |v| v.min(tmax));
+            if lo > hi {
+                problems.push(format!(
+                    "item_min {lo} is above item_max {hi} (after narrowing to the item type)"
+                ));
+            }
+            item_min = (lo != i64::MIN).then_some(lo);
+            item_max = (hi != i64::MAX).then_some(hi);
+        }
+
         let pattern = match a.pattern {
             Some(p) => match compile_pattern(p) {
                 Ok(re) => Some((p.to_string(), re)),
@@ -538,6 +634,10 @@ impl DeclCx {
             schemes: a.schemes.iter().map(|s| s.to_string()).collect(),
             min_items: a.min_items,
             max_items: a.max_items,
+            item_min,
+            item_max,
+            list_encoding: ListEncoding::Json,
+            duration_encoding: DurationEncoding::Go,
             group: a.group.map(str::to_string),
             examples: a.examples.iter().map(|s| s.to_string()).collect(),
             deprecated: a.deprecated.map(str::to_string),

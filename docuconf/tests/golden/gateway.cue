@@ -55,6 +55,8 @@ contract.#Contract & {
 			items:       "int"
 			encoding:    "json"
 			maxItems:    4
+			itemMin:     1
+			itemMax:     65535
 		}
 		LOG_LEVEL: {
 			type:        "enum"
@@ -139,6 +141,14 @@ contract.#Contract & {
 			encoding:    "go"
 			min:         "1s"
 			max:         "5m"
+		}
+		SHARDS: {
+			type:        "list"
+			description: "Shard ids this instance owns"
+			items:       "int"
+			encoding:    "json"
+			itemMin:     0
+			itemMax:     1023
 		}
 		STRIPE_API_BASE: {
 			type:        "url"
