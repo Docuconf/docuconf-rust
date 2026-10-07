@@ -70,3 +70,63 @@ jobs:
             fi
             cargo publish -p "$crate" --locked
           done
+
+  # Attaches the docuconf-derive and docuconf .crate files to the GitHub
+  # Release for the tag. GitHub Packages has no Cargo registry, so the Release
+  # is the GitHub copy. It runs the same checks as `publish` but does not
+  # depend on it, so it works with only the workflow's GITHUB_TOKEN. See
+  # RELEASING.md.
+  github:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release and upload its assets
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: docuconf/docuconf-go
+          path: docuconf-go
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install cue
+        run: go install cuelang.org/go/cmd/cue@v0.17.1
+
+      - name: Tag matches the workspace version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print({p["name"]: p["version"] for p in json.load(sys.stdin)["packages"]}["docuconf"])')
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != v$version"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Check and package
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked
+          cargo package --workspace --exclude orders --locked
+        env:
+          DOCUCONF_SPEC_CUE: ${{ github.workspace }}/docuconf-go/spec/cue
+          DOCUCONF_REQUIRE_VET: "1"
+
+      - name: Attach the .crate files to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            flags=()
+            case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "docuconf $VERSION" "${flags[@]}"
+          fi
+          gh release upload "$GITHUB_REF_NAME" --clobber \
+            "target/package/docuconf-derive-$VERSION.crate" \
+            "target/package/docuconf-$VERSION.crate"
