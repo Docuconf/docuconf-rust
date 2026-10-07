@@ -29,7 +29,8 @@ fn parses_every_list_encoding() {
             ("JSON", r#"["a,b","c"]"#),
             ("IDX__0", "7"),
             ("IDX__1", "8"),
-            ("IDX__3", "ignored: not contiguous"),
+            ("IDX__HOST", "not an item"),
+            ("IDX__01", "not an item either"),
         ])
         .unwrap();
     assert_eq!(v.to_json()["CSV"], json!([1, 2, 3]));
@@ -38,6 +39,18 @@ fn parses_every_list_encoding() {
         v.get("IDX").and_then(Value::as_list),
         Some(&[Value::Int(7), Value::Int(8)][..])
     );
+
+    // Items are numbered from 0 with no gap (SPEC §5).
+    for env in [
+        &[("IDX__0", "1"), ("IDX__2", "3")][..],
+        &[("IDX__1", "2")],
+        &[("IDX__0", "1"), ("IDX__99999999999999999999999", "2")],
+    ] {
+        let e = c.load_env(env.iter().copied()).unwrap_err();
+        assert_eq!(e.codes_for("IDX"), [Code::InvalidType], "{env:?}");
+    }
+    let e = c.load_env([("IDX__0", "1"), ("IDX__2", "3")]).unwrap_err();
+    assert!(e.to_string().contains("IDX__1 is not set"), "{e}");
 
     let e = c.load_env([("IDX__0", "10")]).unwrap_err();
     assert_eq!(e.codes_for("IDX"), [Code::OutOfRange]);
