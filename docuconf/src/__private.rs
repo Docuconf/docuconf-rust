@@ -58,6 +58,8 @@ pub struct FieldAttrs {
     pub max_items: Option<u64>,
     pub item_min: Option<Lit>,
     pub item_max: Option<Lit>,
+    pub item_min_length: Option<u64>,
+    pub item_max_length: Option<u64>,
     pub group: Option<&'static str>,
     pub examples: &'static [&'static str],
     pub deprecated: Option<&'static str>,

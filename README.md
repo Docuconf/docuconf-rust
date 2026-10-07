@@ -271,16 +271,16 @@ reading the environment and the declared files.
 
 | Field type | Contract |
 |---|---|
-| `String` | `string`; `url` with `schemes(...)` or `url`; `enum` with `values(...)` |
+| `String` | `string` (`min_length`, `max_length`, `pattern`); `url` with `schemes(...)` or `url` (`max_length`); `enum` with `values(...)` |
 | `i8`..`i64`, `u8`..`u64`, `isize`, `usize` | `int`, with the type's range as `min`/`max` |
 | `f32`, `f64` | `float` (NaN and infinity rejected) |
 | `bool` | `bool` (`true`/`false`, any case) |
 | `std::time::Duration` + `#[serde(with = "docuconf::humantime_serde")]` | `duration`, encoding `go` |
 | `Option<Duration>` + `#[serde(default, with = "docuconf::humantime_serde::option")]` | optional `duration` |
-| `url::Url` (`docuconf::url::Url`) | `url` |
+| `url::Url` (`docuconf::url::Url`) | `url` (`schemes`, `max_length`) |
 | `#[derive(DocuconfEnum)]` enum | `enum`, values after serde renames |
-| `Vec<String>`, `Vec<u16>`... | `list`, encoding `json`; an int item type narrower than 64 bits exports its range as `itemMin`/`itemMax` |
-| `docuconf::Json<T>` (`T: JsonSchema`) | `json`, with the schema from `T` |
+| `Vec<String>`, `Vec<u16>`... | `list`, encoding `json` (`min_items`, `max_items`); string items take `item_min_length`/`item_max_length`; an int item type narrower than 64 bits exports its range as `itemMin`/`itemMax` |
+| `docuconf::Json<T>` (`T: JsonSchema`) | `json`, with the schema from `T` (`max_length`) |
 | `docuconf::Secret<T>` | `T` with `secret: true`; `Debug` prints `Secret(***)`, `Serialize` writes `"***"` |
 | `secrecy::SecretString`, `secrecy::SecretBox<T>` (feature `secrecy`) | `string` / `T` with `secret: true`, zeroized on drop |
 | `Option<T>` | optional |
@@ -303,10 +303,11 @@ type``. Use `Json<HashMap<..>>` for a map, or `#[docuconf(skip)]` to load the fi
 
 Variable attributes: `default`, `required`, `secret`, `min`, `max`, `min_length`, `max_length`, `pattern` (RE2,
 matches anywhere: anchor with `^`/`$`), `values`, `schemes`, `min_items`, `max_items`, `item_min`, `item_max`,
-`group`, `examples`, `deprecated`, `replaced_by`, `config_key`, `env`, `description`, `skip`. File attributes:
-`path` (required), `name` (input name; default is the field name with `-`), `path_env`, `reload` (only
-`"restart"`; `"watch"` is not implemented yet and is rejected), `max_size` (`65536` or `"64Ki"`), `required`,
-`secret`, `group`, `deprecated`, plus the type-specific ones above. The struct takes `prefix`.
+`item_min_length`, `item_max_length`, `group`, `examples`, `deprecated`, `replaced_by`, `config_key`, `env`,
+`description`, `skip`. File attributes: `path` (required), `name` (input name; default is the field name with
+`-`), `path_env`, `reload` (only `"restart"`; `"watch"` is not implemented yet and is rejected), `max_size`
+(`65536` or `"64Ki"`), `required`, `secret`, `group`, `deprecated`, plus the type-specific ones above. The struct
+takes `prefix`.
 
 `item_min` and `item_max` bound each item of an int list, and an item outside them is `out_of_range` at boot.
 They are narrowed to the item type, as `min`/`max` are for an int variable, so `Vec<u16>` always exports
@@ -318,6 +319,25 @@ pub struct Sharding {
     /// Shard ids this instance owns.
     #[docuconf(item_min = 0, item_max = 1023)]
     pub shards: Vec<u16>,
+}
+```
+
+Lengths count characters (Unicode code points, as `chars().count()` does), never bytes: `"日本"` is 2 and
+`"ZÜ01"` fits `item_max_length = 4`. `min_length`/`max_length` bound a `String`; `max_length` also bounds a `url`
+as it is given and a `json` value's wire string, measured as the app receives it (whitespace included) and, for a
+default or a config-file value, as compact JSON. `item_min_length` and `item_max_length` bound each item of a
+string list after it is split, so separators never count. Every one of them is `out_of_range` at boot, and a
+secret reports its length, never its value:
+
+```rust
+#[derive(serde::Deserialize, docuconf::Docuconf)]
+pub struct Reporting {
+    /// Where to report each run.
+    #[docuconf(schemes = "https", max_length = 40)]
+    pub callback: docuconf::url::Url,
+    /// Branch codes, two to four characters each.
+    #[docuconf(item_min_length = 2, item_max_length = 4)]
+    pub branches: Vec<String>,
 }
 ```
 

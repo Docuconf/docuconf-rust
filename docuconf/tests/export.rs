@@ -394,3 +394,111 @@ fn global_values_override_every_profile() {
         .unwrap();
     assert_eq!(s.workers, 6, "as figment does, and as the contract says");
 }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct RunLimits {
+    max: u32,
+}
+
+#[test]
+fn length_limits_on_urls_json_and_list_items_are_exported() {
+    #[derive(Debug, Deserialize, Docuconf)]
+    #[allow(dead_code)]
+    struct Lengths {
+        /// Where to report the run, PIC X(40).
+        #[docuconf(
+            schemes = "https",
+            max_length = 40,
+            default = "https://ledger.example.com/runs/callback"
+        )]
+        callback_url: String,
+        /// A typed URL, PIC X(30).
+        #[docuconf(max_length = 30)]
+        db_url: Option<Url>,
+        /// Run limits as JSON, PIC X(16).
+        #[docuconf(max_length = 16, default = r#"{"max":12345678}"#)]
+        limits: docuconf::Json<RunLimits>,
+        /// Branch codes, OCCURS 1 TO 8 of PIC X(4).
+        #[docuconf(min_items = 1, max_items = 8, item_min_length = 2, item_max_length = 4, default = ["ZÜ01", "BE", "GE02"])]
+        branches: Vec<String>,
+    }
+    let out = docuconf::export::<Lengths>(&Meta::new("lengths")).unwrap();
+    let block = |name: &str| {
+        let start = out.find(&format!("\t\t{name}: {{")).unwrap();
+        let end = start + out[start..].find("\n\t\t}").unwrap();
+        // Field alignment depends on the neighbours, so compare words.
+        out[start..end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert!(block("CALLBACK_URL").contains("maxLength: 40"), "{out}");
+    assert!(block("DB_URL").contains("maxLength: 30"), "{out}");
+    assert!(block("LIMITS").contains("maxLength: 16"), "{out}");
+    let b = block("BRANCHES");
+    assert!(
+        b.contains("itemMinLength: 2") && b.contains("itemMaxLength: 4"),
+        "{out}"
+    );
+    if let Some(res) = cue_vet(&out) {
+        res.unwrap_or_else(|e| panic!("cue vet failed:\n{e}\n{out}"));
+        // The meta-schema checks the new fields: item lengths on an int
+        // list are rejected.
+        let bad = out
+            .replace("default: [\"ZÜ01\", \"BE\", \"GE02\"]", "default: [1]")
+            .replace("items:         \"string\"", "items:         \"int\"");
+        assert_ne!(bad, out);
+        assert!(cue_vet(&bad).unwrap().is_err());
+    }
+}
+
+#[test]
+fn length_limit_declaration_errors() {
+    #[derive(Debug, Deserialize, Docuconf)]
+    #[allow(dead_code)]
+    struct Bad {
+        /// Item lengths only apply to string lists.
+        #[docuconf(item_max_length = 5)]
+        ports: Vec<u16>,
+        /// Item lengths are not for a plain string.
+        #[docuconf(item_min_length = 1)]
+        name: String,
+        /// maxLength does not apply to a bool.
+        #[docuconf(max_length = 5)]
+        flag: bool,
+        /// Item lengths must leave a range.
+        #[docuconf(item_min_length = 5, item_max_length = 4)]
+        codes: Vec<String>,
+        /// String lengths must leave a range.
+        #[docuconf(min_length = 5, max_length = 4)]
+        label: String,
+        /// A default URL longer than maxLength.
+        #[docuconf(max_length = 10, default = "https://example.com")]
+        site: Url,
+        /// A default list item longer than itemMaxLength, in characters.
+        #[docuconf(item_max_length = 4, default = ["BE", "ZÜRICH"])]
+        branches: Vec<String>,
+        /// A default list item shorter than itemMinLength.
+        #[docuconf(item_min_length = 2, default = ["B"])]
+        regions: Vec<String>,
+        /// A default JSON value longer than maxLength once compact.
+        #[docuconf(max_length = 16, default = r#"{"max":123456789}"#)]
+        limits: docuconf::Json<RunLimits>,
+    }
+    let err = docuconf::check_declaration::<Bad>().unwrap_err();
+    let all = err.problems.join("\n");
+    for want in [
+        "PORTS (Bad.ports): attribute `item_max_length` does not apply to a list of ints variable",
+        "NAME (Bad.name): attribute `item_min_length` does not apply to a string variable",
+        "FLAG (Bad.flag): attribute `max_length` does not apply to a bool variable",
+        "CODES (Bad.codes): item_min_length 5 is above item_max_length 4",
+        "LABEL (Bad.label): min_length 5 is above max_length 4",
+        "SITE (Bad.site): default \"https://example.com\" is 19 characters, above maxLength 10",
+        "BRANCHES (Bad.branches): default [\"BE\",\"ZÜRICH\"] has item 1 \"ZÜRICH\" of 6 characters, above itemMaxLength 4",
+        "REGIONS (Bad.regions): default [\"B\"] has item 0 \"B\" of 1 characters, below itemMinLength 2",
+        "LIMITS (Bad.limits): default {\"max\":123456789} is 17 characters of JSON, above maxLength 16",
+    ] {
+        assert!(all.contains(want), "missing {want:?} in\n{all}");
+    }
+}

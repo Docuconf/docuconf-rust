@@ -206,9 +206,10 @@ pub(crate) fn read(var: &VarDecl, env: &Env) -> Result<Option<Typed>, Violation>
 }
 
 /// Checks a variable's final value (from the environment, a config file or
-/// its default) against its constraints.
-pub(crate) fn finish(var: &VarDecl, t: Typed) -> Result<Typed, Vec<Violation>> {
-    let problems = value::check(var, &t);
+/// its default) against its constraints. `from_env` is true when the value
+/// was read from the environment by [`read`].
+pub(crate) fn finish(var: &VarDecl, t: Typed, from_env: bool) -> Result<Typed, Vec<Violation>> {
+    let problems = value::check_value(var, &t, from_env);
     if problems.is_empty() {
         return Ok(t);
     }
