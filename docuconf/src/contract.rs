@@ -419,6 +419,20 @@ fn var_decl(name: &str, spec: &Json) -> Result<VarDecl, Vec<String>> {
             (None, None)
         }
     };
+    let (item_min_length, item_max_length) = match kind {
+        VarKind::List(ItemKind::String) => (f.uint("itemMinLength"), f.uint("itemMaxLength")),
+        _ => {
+            if f.get("itemMinLength").is_some() || f.get("itemMaxLength").is_some() {
+                f.bad("itemMinLength and itemMaxLength only apply to a list of strings".into());
+            }
+            (None, None)
+        }
+    };
+    if let (Some(lo), Some(hi)) = (item_min_length, item_max_length) {
+        if lo > hi {
+            f.bad(format!("itemMinLength {lo} is above itemMaxLength {hi}"));
+        }
+    }
     let pattern = match f.str("pattern") {
         Some(p) => match compile_pattern(p) {
             Ok(re) => Some((p.to_string(), re)),
@@ -460,6 +474,8 @@ fn var_decl(name: &str, spec: &Json) -> Result<VarDecl, Vec<String>> {
         max_items: f.uint("maxItems"),
         item_min,
         item_max,
+        item_min_length,
+        item_max_length,
         list_encoding,
         duration_encoding,
         group: f.str("group").map(str::to_string),
@@ -631,12 +647,16 @@ impl Contract {
         let mut violations = Vec::new();
         let mut values = BTreeMap::new();
         for var in &self.vars {
+            let mut from_env = false;
             let found = match env::read(var, env) {
                 Err(v) => {
                     violations.push(v);
                     continue;
                 }
-                Ok(Some(t)) => Some(t),
+                Ok(Some(t)) => {
+                    from_env = true;
+                    Some(t)
+                }
                 Ok(None) => profile_defaults
                     .and_then(|d| d.get(&var.name))
                     .or(var.default.as_ref())
@@ -647,7 +667,7 @@ impl Contract {
                 None => {
                     values.insert(var.name.clone(), None);
                 }
-                Some(t) => match env::finish(var, t) {
+                Some(t) => match env::finish(var, t, from_env) {
                     Ok(t) => {
                         values.insert(var.name.clone(), Some(Value::from_typed(t)));
                     }

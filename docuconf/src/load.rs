@@ -279,13 +279,19 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
         // 1. The environment, parsed in its wire form.
         let mut defaults = Dict::new();
         let mut env_layer = Dict::new();
+        // Variables the environment set: it is the top layer, so their final
+        // value is the one read from it.
+        let mut from_env = BTreeSet::new();
         for var in &decl.vars {
             if let Some(d) = &var.default {
                 insert_path(&mut defaults, &var.key, d.to_figment());
             }
             match env::read(var, env) {
                 Ok(None) => {}
-                Ok(Some(t)) => insert_path(&mut env_layer, &var.key, t.to_figment()),
+                Ok(Some(t)) => {
+                    insert_path(&mut env_layer, &var.key, t.to_figment());
+                    from_env.insert(var.name.clone());
+                }
                 Err(v) => {
                     viols.push(v);
                     failed.insert(var.name.clone());
@@ -346,7 +352,7 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
                         ));
                         failed.insert(var.name.clone());
                     }
-                    Ok(t) => match env::finish(var, t) {
+                    Ok(t) => match env::finish(var, t, from_env.contains(&var.name)) {
                         Ok(t) => {
                             values.insert(var.name.clone(), t);
                         }

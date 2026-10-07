@@ -241,6 +241,9 @@ fn var_node(v: &VarDecl, file_default: Option<&Typed>, config_key: Option<&Strin
             if !v.schemes.is_empty() {
                 add("schemes", strs(&v.schemes));
             }
+            if let Some(n) = v.max_length {
+                add("maxLength", Node::Int(n as i64));
+            }
         }
         VarKind::Enum(values) => add("values", strs(values)),
         VarKind::List(item) => {
@@ -270,8 +273,19 @@ fn var_node(v: &VarDecl, file_default: Option<&Typed>, config_key: Option<&Strin
             if let Some(n) = v.item_max {
                 add("itemMax", Node::Int(n));
             }
+            if let Some(n) = v.item_min_length {
+                add("itemMinLength", Node::Int(n as i64));
+            }
+            if let Some(n) = v.item_max_length {
+                add("itemMaxLength", Node::Int(n as i64));
+            }
         }
-        VarKind::Json { schema, .. } => add("schema", Node::from_json(schema)),
+        VarKind::Json { schema, .. } => {
+            if let Some(n) = v.max_length {
+                add("maxLength", Node::Int(n as i64));
+            }
+            add("schema", Node::from_json(schema));
+        }
         VarKind::Bool => {}
     }
     Node::Struct(f)
