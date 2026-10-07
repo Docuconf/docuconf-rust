@@ -54,6 +54,7 @@ contract.#Contract & {
 		WORKER_COUNT: {
 			type:        "int"
 			description: "Threads serving requests"
+			details:     "Each worker answers one connection at a time, so this is also the\nnumber of requests served at once. Raise it when requests queue up;\neach worker holds a `std::thread` stack.\n\nKeep it at or below the database pool size:\n\n- one connection per worker;\n- plus one for migrations."
 			default:     4
 			min:         1
 			max:         64

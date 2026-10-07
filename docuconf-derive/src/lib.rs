@@ -5,6 +5,8 @@
 //! struct, and `#[derive(serde::Deserialize, docuconf::DocuconfEnum)]` on a
 //! unit-only enum used as an `enum` variable.
 
+mod doc;
+
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{quote, quote_spanned};
@@ -191,6 +193,7 @@ fn split_words(name: &str) -> Vec<String> {
 struct DocAttrs {
     set: Vec<String>,
     description: Option<String>,
+    details: Option<String>,
     env: Option<String>,
     name: Option<String>,
     required: bool,
@@ -329,6 +332,7 @@ fn parse_doc_attrs(attrs: &[Attribute]) -> syn::Result<DocAttrs> {
             };
             match key.as_str() {
                 "description" | "desc" => a.description = Some(s(&meta)?),
+                "details" => a.details = Some(s(&meta)?),
                 "env" => a.env = Some(s(&meta)?),
                 "name" => a.name = Some(s(&meta)?),
                 "required" => a.required = true,
@@ -377,30 +381,18 @@ fn parse_doc_attrs(attrs: &[Attribute]) -> syn::Result<DocAttrs> {
     Ok(a)
 }
 
-/// Joins `///` doc comment lines into one description, dropping a single
-/// trailing period so "HTTP listen port." becomes "HTTP listen port".
-fn doc_comment(attrs: &[Attribute]) -> String {
-    let mut lines = Vec::new();
-    for attr in attrs.iter().filter(|a| a.path().is_ident("doc")) {
-        if let syn::Meta::NameValue(nv) = &attr.meta {
-            if let Expr::Lit(ExprLit {
-                lit: Lit::Str(s), ..
-            }) = &nv.value
-            {
-                for line in s.value().lines() {
-                    let t = line.trim();
-                    if !t.is_empty() {
-                        lines.push(t.to_string());
-                    }
-                }
-            }
-        }
-    }
-    let mut s = lines.join(" ");
-    if s.ends_with('.') && !s.ends_with("..") {
-        s.pop();
-    }
-    s
+/// The description and details from a field's `///` doc comment and its
+/// `description` and `details` attributes: an attribute wins over the
+/// comment, and the comment's first paragraph is the description and the
+/// rest the details (see the `doc` module).
+fn describe(a: &DocAttrs, attrs: &[Attribute]) -> (String, Option<String>) {
+    let (desc, details) = doc::split_doc(&doc::doc_lines(attrs));
+    let description = a.description.clone().unwrap_or(desc);
+    let details = a
+        .details
+        .clone()
+        .or_else(|| (!details.is_empty()).then_some(details));
+    (description, details)
 }
 
 fn opt_str(v: &Option<String>) -> TokenStream2 {
@@ -485,10 +477,8 @@ fn expand_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
             Some(r) => r.clone(),
             None => rename(&rust_name, container.rename_all.as_deref(), f.span())?,
         };
-        let description = a
-            .description
-            .clone()
-            .unwrap_or_else(|| doc_comment(&f.attrs));
+        let (description, details) = describe(&a, &f.attrs);
+        let details = opt_str(&details);
         let ty = &f.ty;
         let set = &a.set;
         let required = a.required;
@@ -536,6 +526,7 @@ fn expand_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     field: #field_path,
                     key: #key,
                     description: #description,
+                    details: #details,
                     set: &[#(#set),*],
                     env: #env,
                     name: #name,

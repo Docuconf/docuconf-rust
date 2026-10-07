@@ -14,7 +14,7 @@
 //!     "kind": "ConfigContract",
 //!     "metadata": {"name": "billing-api"},
 //!     "vars": {
-//!         "PORT": {"type": "int", "description": "HTTP listen port", "default": 8080, "min": 1, "max": 65535},
+//!         "PORT": {"type": "int", "description": "HTTP listen port", "details": "Behind the mesh, keep the default.", "default": 8080, "min": 1, "max": 65535},
 //!         "TIMEOUT": {"type": "duration", "description": "Upstream timeout", "encoding": "iso8601", "required": true}
 //!     }
 //! }"#).unwrap();
@@ -453,6 +453,11 @@ fn var_decl(name: &str, spec: &Json) -> Result<VarDecl, Vec<String>> {
         _ => (None, None),
     };
     let description = f.str("description").unwrap_or_default().to_string();
+    // Docs only: checked as SPEC §4.2 says, then never read.
+    let details = f.str("details").map(str::to_string);
+    if let Some(p) = crate::decl::check_details(details.as_deref()) {
+        f.bad(p);
+    }
     let required = f.bool("required");
     let secret = f.bool("secret");
     let mut decl = VarDecl {
@@ -461,6 +466,7 @@ fn var_decl(name: &str, spec: &Json) -> Result<VarDecl, Vec<String>> {
         field: name.to_string(),
         kind,
         description,
+        details,
         required,
         secret,
         default: None,
