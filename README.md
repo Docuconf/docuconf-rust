@@ -9,6 +9,9 @@ JSON/YAML/TOML config files, text and binary files.
 Part of [docuconf](https://github.com/docuconf). See the
 [specification](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md).
 
+**Example:** [`examples/orders/`](https://github.com/docuconf/docuconf-rust/tree/main/examples/orders), a small HTTP service with its declaration, exported
+contract and boot-time errors.
+
 > **Status:** `0.1.0`. The contract format is a draft (`v1alpha1`) and the API may change.
 
 ## Why figment
@@ -239,7 +242,7 @@ belong in a flag service (spec §10).
 `docuconf::Contract` validates an environment against a contract given as JSON (`cue export contract.cue`), with
 no Rust declaration, and returns typed values. Use it for a contract written by hand in CUE, or to check an
 environment in a tool. It parses every wire encoding of spec §5 (lists `csv` with any `separator`, `json` and
-`indexed` as `NAME__0`, `NAME__1`...; durations `go`, `iso8601`, `seconds` and `timespan`) and runs the same checks
+`indexed` as `NAME__0`, `NAME__1`..., numbered from 0 with no gap; durations `go`, `iso8601`, `seconds` and `timespan`) and runs the same checks
 as a `#[derive(Docuconf)]` struct, so both accept exactly the same values:
 
 ```rust

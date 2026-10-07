@@ -66,4 +66,47 @@ jobs:
 
       - name: Package
         if: matrix.rust == 'stable'
-        run: cargo package --workspace --locked
+        run: cargo package --workspace --exclude orders --locked
+
+  # examples/orders: builds against the SDK in this repository, keeps its
+  # committed contract.cue in step with the code, and boots.
+  example:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: docuconf/docuconf-go
+          path: docuconf-go
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install cue
+        run: go install cuelang.org/go/cmd/cue@v0.17.1
+
+      - name: Build
+        run: cargo build --locked -p orders
+
+      - name: Contract is up to date
+        working-directory: examples/orders
+        run: |
+          cargo run --locked --quiet -p orders -- export "$RUNNER_TEMP/contract.cue"
+          diff -u contract.cue "$RUNNER_TEMP/contract.cue" \
+            || { echo "contract.cue is stale: run 'cargo run -p orders -- export contract.cue' in examples/orders"; exit 1; }
+
+      - name: Vet the contract
+        run: |
+          vet="$RUNNER_TEMP/vet"
+          mkdir -p "$vet/orders"
+          cp -r docuconf-go/spec/cue/cue.mod docuconf-go/spec/cue/contract "$vet/"
+          cp examples/orders/contract.cue "$vet/orders/"
+          cd "$vet" && "$(go env GOPATH)/bin/cue" vet -c ./orders
+
+      - name: Smoke test
+        run: examples/orders/smoke.sh

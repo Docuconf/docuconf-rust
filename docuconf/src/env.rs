@@ -60,6 +60,34 @@ impl Env {
         self.vars.get(name).map(String::as_str)
     }
 
+    /// The items of the indexed list `name` (SPEC §5): how many there are
+    /// from `name__0` on, and the first missing index when a higher one is
+    /// set. Only a decimal suffix with no leading zero is an item, so
+    /// `name__HOST` and `name__01` are not.
+    pub(crate) fn indexed_items(&self, name: &str) -> (usize, Option<usize>) {
+        let prefix = format!("{name}__");
+        let mut set = BTreeSet::new();
+        let mut beyond = false;
+        for key in self.vars.keys().chain(self.not_utf8.iter()) {
+            let Some(n) = key.strip_prefix(&prefix) else {
+                continue;
+            };
+            if !is_index(n) {
+                continue;
+            }
+            match n.parse::<usize>() {
+                Ok(i) => {
+                    set.insert(i);
+                }
+                // Too large to be anything but past a gap.
+                Err(_) => beyond = true,
+            }
+        }
+        let count = (0..).find(|i| !set.contains(i)).unwrap_or(0);
+        let gap = (beyond || set.len() > count).then_some(count);
+        (count, gap)
+    }
+
     fn raw(&self, name: &str) -> Raw<'_> {
         match self.vars.get(name) {
             Some(v) => Raw::Value(v),
@@ -67,6 +95,11 @@ impl Env {
             None => Raw::Absent,
         }
     }
+}
+
+/// A decimal index with no leading zero.
+fn is_index(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) && (s == "0" || !s.starts_with('0'))
 }
 
 fn violation(var: &VarDecl, code: Code, message: String) -> Violation {
@@ -106,30 +139,42 @@ pub(crate) fn read(var: &VarDecl, env: &Env) -> Result<Option<Typed>, Violation>
         )
     };
     // The raw strings: one, or one per item of an indexed list.
-    let raws: Vec<&str> =
-        if matches!(var.kind, VarKind::List(_)) && var.list_encoding == ListEncoding::Indexed {
-            let mut items = Vec::new();
-            loop {
-                match env.raw(&format!("{}__{}", var.name, items.len())) {
-                    Raw::Absent => break,
-                    Raw::NotUtf8 => return Err(not_utf8()),
-                    Raw::Value(v) => items.push(v),
-                }
-            }
-            if items.is_empty() {
-                return Ok(None);
-            }
-            items
-        } else {
-            match env.raw(&var.name) {
-                Raw::Absent => return Ok(None),
+    let raws: Vec<&str> = if matches!(var.kind, VarKind::List(_))
+        && var.list_encoding == ListEncoding::Indexed
+    {
+        let (count, gap) = env.indexed_items(&var.name);
+        if let Some(missing) = gap {
+            return Err(violation(
+                    var,
+                    Code::InvalidType,
+                    format!(
+                        "items must be numbered from {name}__0 with no gap, but {name}__{missing} is not set",
+                        name = var.name
+                    ),
+                ));
+        }
+        if count == 0 {
+            return Ok(None);
+        }
+        let mut items = Vec::with_capacity(count);
+        for i in 0..count {
+            match env.raw(&format!("{}__{i}", var.name)) {
+                Raw::Value(v) => items.push(v),
                 Raw::NotUtf8 => return Err(not_utf8()),
-                Raw::Value(v) if v.is_empty() && !matches!(var.kind, VarKind::String) => {
-                    return Ok(None)
-                }
-                Raw::Value(v) => vec![v],
+                Raw::Absent => unreachable!("indexed_items counted {}__{i}", var.name),
             }
-        };
+        }
+        items
+    } else {
+        match env.raw(&var.name) {
+            Raw::Absent => return Ok(None),
+            Raw::NotUtf8 => return Err(not_utf8()),
+            Raw::Value(v) if v.is_empty() && !matches!(var.kind, VarKind::String) => {
+                return Ok(None)
+            }
+            Raw::Value(v) => vec![v],
+        }
+    };
 
     if let Some(msg) = &var.deprecated {
         let by = var
