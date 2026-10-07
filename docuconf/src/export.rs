@@ -36,6 +36,28 @@ impl Meta {
         self.app_version = Some(v.into());
         self
     }
+
+    /// Sets the CUE package name (default: `name` with `-` replaced by
+    /// `_`).
+    pub fn package(mut self, p: impl Into<String>) -> Self {
+        self.package = Some(p.into());
+        self
+    }
+}
+
+/// The profile selector must be a declared, non-secret variable, so export
+/// and boot agree on it.
+pub(crate) fn check_selector(decl: &Declaration, selector: &str) -> Result<(), DeclarationError> {
+    let problem = match decl.var(selector) {
+        None => format!(
+            "profile selector {selector} must be a declared variable; add a field for it (for example `app_profile: Option<String>`) to the struct"
+        ),
+        Some(v) if v.secret => format!("profile selector {selector} must not be a secret"),
+        _ => return Ok(()),
+    };
+    Err(DeclarationError {
+        problems: vec![problem],
+    })
 }
 
 /// The profile layout of the app's config files.
@@ -402,16 +424,8 @@ pub(crate) fn render(
         problems.push(format!("CUE package name {package:?} is not an identifier"));
     }
     if let Some(p) = profiles {
-        match decl.var(&p.selector) {
-            None => problems.push(format!(
-                "profile selector {} must be a declared variable",
-                p.selector
-            )),
-            Some(v) if v.secret => problems.push(format!(
-                "profile selector {} must not be a secret",
-                p.selector
-            )),
-            _ => {}
+        if let Err(e) = check_selector(decl, &p.selector) {
+            problems.extend(e.problems);
         }
     }
     if !problems.is_empty() {

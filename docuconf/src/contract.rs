@@ -599,6 +599,14 @@ impl Contract {
     /// [`Loader::load`](crate::Loader::load) does.
     pub fn load(&self) -> Result<Values, Error> {
         let env = Env::process();
+        for w in env::typo_hints(&self.vars, "", &[], &env) {
+            eprintln!("docuconf: {w}");
+        }
+        for var in &self.vars {
+            if let Some(w) = env::deprecation(var, &env) {
+                eprintln!("docuconf: {w}");
+            }
+        }
         self.load_from(&env).map_err(|e| {
             crate::load::write_termination_log(&env.vars, &e);
             Error::Validation(e)

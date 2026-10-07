@@ -2,8 +2,10 @@
 //! everything and reporting every violation together.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fmt::Display;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use figment::providers::Serialized;
@@ -20,6 +22,9 @@ use crate::overlay::{self, Overlay};
 use crate::types;
 use crate::value::{self, Typed};
 use crate::Docuconf;
+
+/// Receives each warning `load` reports, without the `docuconf: ` prefix.
+type WarnFn = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Loads a `#[derive(Docuconf)]` struct, with options.
 ///
@@ -48,7 +53,8 @@ pub struct Loader<C> {
     env: Option<HashMap<String, String>>,
     dotenv: Option<PathBuf>,
     now: Option<SystemTime>,
-    termination_log: bool,
+    termination_log: Option<bool>,
+    warn: Option<WarnFn>,
     _c: PhantomData<fn() -> C>,
 }
 
@@ -61,7 +67,8 @@ impl<C> Default for Loader<C> {
             env: None,
             dotenv: None,
             now: None,
-            termination_log: true,
+            termination_log: None,
+            warn: None,
             _c: PhantomData,
         }
     }
@@ -132,7 +139,11 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
     }
 
     /// Reads variables from this map instead of the process environment.
-    /// Meant for tests.
+    /// Meant for tests: the process environment is neither read nor
+    /// changed, and nothing is written to the termination log unless
+    /// [`termination_log(true)`](Loader::termination_log) asks for it. Put
+    /// `DOCUCONF_FILE_ROOT` in the map to read file inputs from a test
+    /// directory.
     pub fn env<I, K, V>(mut self, vars: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,
@@ -160,27 +171,53 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
         self
     }
 
-    /// Whether to write violations to `/dev/termination-log` (or
-    /// `DOCUCONF_TERMINATION_LOG`). On by default.
+    /// Whether to write the problems to `/dev/termination-log` (or
+    /// `DOCUCONF_TERMINATION_LOG`) when loading fails, so `kubectl describe
+    /// pod` shows them. On by default, off when [`env`](Loader::env)
+    /// replaces the process environment.
     pub fn termination_log(mut self, on: bool) -> Self {
-        self.termination_log = on;
+        self.termination_log = Some(on);
         self
     }
 
+    /// Where `load` sends warnings: a set variable that looks like a typo of
+    /// a declared one, a deprecated variable that is set, a feature-flag
+    /// name. By default each is printed to stderr as `docuconf: <warning>`.
+    /// Pass `|w| tracing::warn!("{w}")` to route them to your logger, or
+    /// `|_| {}` to drop them.
+    pub fn on_warning(mut self, f: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        self.warn = Some(Arc::new(f));
+        self
+    }
+
+    fn warn(&self, w: &str) {
+        match &self.warn {
+            Some(f) => f(w),
+            None => eprintln!("docuconf: {w}"),
+        }
+    }
+
     /// Exports the contract, including the values in the app's config files
-    /// and its profiles.
+    /// and its profiles. Warnings go to the `log` crate; use
+    /// [`export_with_warnings`](Loader::export_with_warnings) to get them.
     pub fn export(&self, meta: &Meta) -> Result<String, DeclarationError> {
-        let decl = decl::declaration::<C>()?;
-        for w in &decl.warnings {
+        let out = self.export_with_warnings(meta)?;
+        for w in &out.warnings {
             log::warn!("docuconf: {w}");
         }
+        Ok(out.cue)
+    }
+
+    /// Exports the contract, returning the warnings with it: feature-flag
+    /// names, config-file keys that are not declared variables.
+    pub fn export_with_warnings(&self, meta: &Meta) -> Result<Export, DeclarationError> {
+        let decl = decl::declaration::<C>()?;
+        let mut warnings = decl.warnings.clone();
         let values = match &self.figment {
             None => None,
             Some(fig) => {
                 let fv = export::file_values(&decl, fig)?;
-                for w in &fv.warnings {
-                    log::warn!("docuconf: {w}");
-                }
+                warnings.extend(fv.warnings.iter().cloned());
                 if self.profiles.is_none() {
                     if let Some(name) = fv.profiles.keys().next() {
                         return Err(DeclarationError {
@@ -193,23 +230,125 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
                 Some(fv)
             }
         };
-        let warnings = overlay::check(
+        warnings.extend(overlay::check(
             &decl,
             &self.overlays,
             self.selector(),
             &overlay::shipped_dirs(self.figment.as_ref()),
             None,
-        )?;
-        for w in &warnings {
-            log::warn!("docuconf: {w}");
-        }
-        export::render(
+        )?);
+        let cue = export::render(
             &decl,
             meta,
             values.as_ref(),
             self.profiles.as_ref(),
             &self.overlays,
-        )
+        )?;
+        Ok(Export { cue, warnings })
+    }
+
+    /// Runs the export command when the program was started as
+    /// `<program> export [--check] [PATH]`, then exits; otherwise returns
+    /// and `main` carries on. Call it first thing in `main`:
+    ///
+    /// - `<program> export contract.cue` writes the contract (the default
+    ///   path is `contract.cue`);
+    /// - `<program> export --check contract.cue` exits 1, showing the first
+    ///   difference, when the committed contract is stale. Run it in CI.
+    ///
+    /// Warnings and errors go to stderr. See also
+    /// [`assert_contract`](Loader::assert_contract), the same check as a
+    /// unit test.
+    pub fn export_command(&self, meta: &Meta) {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().map(String::as_str) == Some("export") {
+            std::process::exit(self.run_export(meta, &args[1..]));
+        }
+    }
+
+    /// The export command on `args` (after `export`); returns the exit code.
+    pub(crate) fn run_export(&self, meta: &Meta, args: &[String]) -> i32 {
+        let mut check = false;
+        let mut path = None;
+        for a in args {
+            match a.as_str() {
+                "--check" => check = true,
+                s if !s.starts_with('-') && path.is_none() => path = Some(s.to_string()),
+                other => {
+                    eprintln!(
+                        "docuconf: unexpected argument {other:?}; usage: export [--check] [PATH]"
+                    );
+                    return 2;
+                }
+            }
+        }
+        let path = path.unwrap_or_else(|| "contract.cue".to_string());
+        let out = match self.export_with_warnings(meta) {
+            Ok(out) => out,
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        };
+        for w in &out.warnings {
+            eprintln!("docuconf: warning: {w}");
+        }
+        if check {
+            match check_contract(&out.cue, Path::new(&path)) {
+                Ok(()) => {
+                    eprintln!("docuconf: {path} is up to date");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{e}\nre-export it with: <program> export {path}");
+                    1
+                }
+            }
+        } else {
+            match std::fs::write(&path, &out.cue) {
+                Ok(()) => {
+                    eprintln!("docuconf: wrote {path}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("docuconf: cannot write {path}: {e}");
+                    1
+                }
+            }
+        }
+    }
+
+    /// Panics when the contract at `path` is not what this declaration
+    /// exports, showing the first difference; with `UPDATE_CONTRACT=1` in
+    /// the environment it rewrites the file instead. A unit test that keeps
+    /// a committed `contract.cue` current:
+    ///
+    /// ```no_run
+    /// # use serde::Deserialize;
+    /// # #[derive(Deserialize, docuconf::Docuconf)]
+    /// # struct Config {
+    /// #     /// HTTP listen port.
+    /// #     #[docuconf(default = 8080)]
+    /// #     port: u16,
+    /// # }
+    /// #[test]
+    /// fn contract_is_current() {
+    ///     docuconf::Loader::<Config>::new()
+    ///         .assert_contract(&docuconf::Meta::new("billing-api"), "contract.cue");
+    /// }
+    /// ```
+    #[track_caller]
+    pub fn assert_contract(&self, meta: &Meta, path: impl AsRef<Path>) {
+        let path = path.as_ref();
+        let cue = self.export(meta).unwrap_or_else(|e| panic!("{e}"));
+        if std::env::var_os("UPDATE_CONTRACT").is_some_and(|v| v == "1") {
+            std::fs::write(path, cue)
+                .unwrap_or_else(|e| panic!("docuconf: cannot write {}: {e}", path.display()));
+            return;
+        }
+        if let Err(e) = check_contract(&cue, path) {
+            panic!("{e}\nrun the test again with UPDATE_CONTRACT=1 to rewrite it");
+        }
     }
 
     fn selector(&self) -> Option<&str> {
@@ -232,14 +371,55 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
     }
 
     /// Loads and checks every declared variable and file input. On failure,
-    /// every violation is reported together, and written to the
-    /// termination log.
+    /// every problem is reported together, and written to the termination
+    /// log. Warnings go to [`on_warning`](Loader::on_warning) (stderr by
+    /// default).
     pub fn load(&self) -> Result<C, Error> {
-        let decl = decl::declaration::<C>()?;
-        for w in &decl.warnings {
-            log::warn!("docuconf: {w}");
-        }
         let env = self.environment();
+        let out = self.load_from(&env);
+        if let Err(e) = &out {
+            // With `env(map)`, only a log path the map names explicitly.
+            let default = self.env.is_none() || env.vars.contains_key("DOCUCONF_TERMINATION_LOG");
+            if self.termination_log.unwrap_or(default) {
+                write_termination_log(&env.vars, e);
+            }
+        }
+        out
+    }
+
+    /// Loads like [`load`](Loader::load); on failure prints the report to
+    /// stderr and exits with status 1, with no panic and no backtrace. The
+    /// usual first line of `main`.
+    pub fn load_or_exit(&self) -> C {
+        self.load().unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1)
+        })
+    }
+
+    fn load_from(&self, env: &Env) -> Result<C, Error> {
+        let decl = decl::declaration::<C>()?;
+        if let Some(p) = &self.profiles {
+            export::check_selector(&decl, &p.selector)?;
+        }
+        for w in &decl.warnings {
+            self.warn(w);
+        }
+        for w in env::typo_hints(&decl.vars, C::PREFIX, &extra_names(&decl), env) {
+            self.warn(&w);
+        }
+        for var in &decl.vars {
+            if let Some(w) = env::deprecation(var, env) {
+                self.warn(&w);
+            }
+        }
+        if let (Some(p), Some(app)) = (&self.profiles, &self.figment) {
+            if let Some(selected) = env.get(&p.selector).filter(|s| !s.is_empty()) {
+                if let Some(w) = unknown_profile(p, app, selected) {
+                    self.warn(&w);
+                }
+            }
+        }
         if !self.overlays.is_empty() {
             let mut app_dirs = overlay::shipped_dirs(self.figment.as_ref());
             if let Some(dir) = std::env::current_exe()
@@ -256,15 +436,10 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
                 file_root(&env.vars).as_deref(),
             )?;
         }
-        match self.load_with(&decl, &env) {
-            Ok(c) => Ok(c),
-            Err(e) => {
-                if self.termination_log {
-                    write_termination_log(&env.vars, &e);
-                }
-                Err(Error::Validation(e))
-            }
-        }
+        self.load_with(&decl, env).map_err(|mut e| {
+            sort_violations(&decl, &mut e.violations);
+            Error::Validation(e)
+        })
     }
 
     fn load_with(&self, decl: &Declaration, env: &Env) -> Result<C, ValidationError> {
@@ -436,7 +611,103 @@ pub(crate) fn file_root(env: &HashMap<String, String>) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-pub(crate) fn write_termination_log(env: &HashMap<String, String>, e: &ValidationError) {
+/// What [`Loader::export_with_warnings`] returns.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Export {
+    /// The contract, as CUE.
+    pub cue: String,
+    /// Warnings about the declaration, one line each.
+    pub warnings: Vec<String>,
+}
+
+/// Compares an exported contract with the file at `path`.
+pub(crate) fn check_contract(cue: &str, path: &Path) -> Result<(), String> {
+    let shown = path.display();
+    let old = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("docuconf: {shown} does not exist"));
+        }
+        Err(e) => return Err(format!("docuconf: cannot read {shown}: {e}")),
+    };
+    if old == cue {
+        return Ok(());
+    }
+    let (old_lines, new_lines): (Vec<&str>, Vec<&str>) =
+        (old.lines().collect(), cue.lines().collect());
+    let i = old_lines
+        .iter()
+        .zip(&new_lines)
+        .position(|(a, b)| a != b)
+        .unwrap_or(old_lines.len().min(new_lines.len()));
+    let line = |l: &[&str]| {
+        l.get(i)
+            .map_or("(end of file)".to_string(), |s| s.to_string())
+    };
+    Err(format!(
+        "docuconf: {shown} is out of date; first difference at line {}:\n  - {}\n  + {}",
+        i + 1,
+        line(&old_lines),
+        line(&new_lines)
+    ))
+}
+
+/// Names besides the declared variables that a set variable may be
+/// mistaken for, for typo hints: `path_env` overrides.
+fn extra_names(decl: &Declaration) -> Vec<String> {
+    decl.files
+        .iter()
+        .filter_map(|f| f.path_env.clone())
+        .collect()
+}
+
+/// A warning when the profile selector names a profile that none of the
+/// app's config files define (and that is not the default): only base
+/// values and the environment apply. The spec allows such a profile (the
+/// platform supplies its values), so this is not a violation, but it is
+/// usually a typo.
+fn unknown_profile(p: &Profiles, app: &Figment, selected: &str) -> Option<String> {
+    if selected.eq_ignore_ascii_case(&p.default) {
+        return None;
+    }
+    let mut known: Vec<String> = app
+        .profiles()
+        .filter(|pr| **pr != Profile::Default && **pr != Profile::Global)
+        .map(|pr| pr.as_str().as_str().to_string())
+        .collect();
+    if known.iter().any(|k| k.eq_ignore_ascii_case(selected)) {
+        return None;
+    }
+    if !known.iter().any(|k| k.eq_ignore_ascii_case(&p.default)) {
+        known.push(p.default.clone());
+    }
+    known.sort();
+    Some(format!(
+        "{} selects profile {}, which no config file defines, so only base values and the environment apply; the config files define {}",
+        p.selector,
+        Typed::Str(selected.to_string()).show(),
+        known.join(", ")
+    ))
+}
+
+/// Orders violations by input: variables by name, then file inputs by
+/// name, then anything else (an overlay), so the report reads the same
+/// whatever stage found each problem.
+fn sort_violations(decl: &Declaration, v: &mut [Violation]) {
+    v.sort_by_key(|x| {
+        let group = if decl.var(&x.input).is_some() {
+            0
+        } else if decl.files.iter().any(|f| f.name == x.input) {
+            1
+        } else {
+            2
+        };
+        (group, x.input.clone())
+    });
+}
+
+pub(crate) fn write_termination_log(env: &HashMap<String, String>, e: &dyn Display) {
     let path = match env
         .get("DOCUCONF_TERMINATION_LOG")
         .filter(|s| !s.is_empty())
@@ -451,4 +722,52 @@ pub(crate) fn write_termination_log(env: &HashMap<String, String>, e: &Validatio
         }
     };
     let _ = std::fs::write(path, format!("{e}\n"));
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Docuconf, Loader, Meta};
+    use serde::Deserialize;
+
+    #[derive(Deserialize, Docuconf)]
+    #[allow(dead_code)]
+    struct Svc {
+        /// HTTP listen port.
+        #[docuconf(default = 8080)]
+        port: u16,
+    }
+
+    fn run(args: &[&str]) -> i32 {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        Loader::<Svc>::new().run_export(&Meta::new("svc"), &args)
+    }
+
+    #[test]
+    fn export_command_writes_then_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("contract.cue");
+        let p = path.to_str().unwrap();
+        // Missing file: --check fails.
+        assert_eq!(run(&["--check", p]), 1);
+        assert_eq!(run(&[p]), 0);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("PORT: {"));
+        assert_eq!(run(&["--check", p]), 0);
+        std::fs::write(&path, "stale").unwrap();
+        assert_eq!(run(&[p, "--check"]), 1);
+        assert_eq!(run(&["--bogus"]), 2);
+        assert_eq!(run(&[p, "extra"]), 2);
+    }
+
+    #[test]
+    fn check_contract_shows_the_first_difference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.cue");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+        assert!(super::check_contract("a\nb\nc\n", &path).is_ok());
+        let e = super::check_contract("a\nB\nc\n", &path).unwrap_err();
+        assert!(
+            e.ends_with("first difference at line 2:\n  - b\n  + B"),
+            "{e}"
+        );
+    }
 }

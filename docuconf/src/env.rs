@@ -176,14 +176,6 @@ pub(crate) fn read(var: &VarDecl, env: &Env) -> Result<Option<Typed>, Violation>
         }
     };
 
-    if let Some(msg) = &var.deprecated {
-        let by = var
-            .replaced_by
-            .as_ref()
-            .map(|r| format!("; use {r}"))
-            .unwrap_or_default();
-        log::warn!("docuconf: {} is deprecated: {msg}{by}", var.name);
-    }
     // An injector reference that is still there means the injector did not
     // run (SPEC §4.5.1, §11.2). Name the scheme, never the value.
     if var.secret {
@@ -239,4 +231,111 @@ pub(crate) fn missing(var: &VarDecl) -> Violation {
         Code::MissingRequired,
         "is required but not set".to_string(),
     )
+}
+
+/// The warning for a deprecated variable that is set, if `var` is one.
+pub(crate) fn deprecation(var: &VarDecl, env: &Env) -> Option<String> {
+    let msg = var.deprecated.as_ref()?;
+    let set = env.vars.get(&var.name).is_some_and(|v| !v.is_empty())
+        || (var.list_encoding == ListEncoding::Indexed && env.indexed_items(&var.name).0 > 0);
+    if !set {
+        return None;
+    }
+    let by = var
+        .replaced_by
+        .as_ref()
+        .map(|r| format!("; use {r}"))
+        .unwrap_or_default();
+    Some(format!("{} is deprecated: {msg}{by}", var.name))
+}
+
+/// Variables every process has, never typos of a declared name.
+const SYSTEM: &[&str] = &[
+    "HOME", "HOSTNAME", "LANG", "LANGUAGE", "LOGNAME", "MAIL", "OLDPWD", "PATH", "PWD", "SHELL",
+    "SHLVL", "TERM", "TMPDIR", "TZ", "USER",
+];
+
+/// Levenshtein distance, giving up above `max`.
+fn distance(a: &str, b: &str, max: usize) -> Option<usize> {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len().abs_diff(b.len()) > max {
+        return None;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let sub = prev[j] + usize::from(ca != cb);
+            cur[j + 1] = sub.min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    let d = prev[b.len()];
+    (d <= max).then_some(d)
+}
+
+/// Warnings for set variables that are not declared but are within edit
+/// distance 2 of a declared name (1 for names shorter than 8 characters,
+/// where 2 edits turn one ordinary name into another): `DATABSE_URL is set
+/// but not declared; did you mean DATABASE_URL?`. With a prefix, only
+/// variables under it are considered, and every undeclared one is
+/// reported. Values are never shown.
+pub(crate) fn typo_hints(
+    vars: &[VarDecl],
+    prefix: &str,
+    extra: &[String],
+    env: &Env,
+) -> Vec<String> {
+    let declared: Vec<&str> = vars
+        .iter()
+        .map(|v| v.name.as_str())
+        .chain(extra.iter().map(String::as_str))
+        .collect();
+    let mut keys: Vec<&String> = env.vars.keys().chain(env.not_utf8.iter()).collect();
+    keys.sort();
+    let mut out = Vec::new();
+    for key in keys {
+        if declared.contains(&key.as_str())
+            || !crate::decl::is_env_name(key)
+            || !key.starts_with(prefix)
+            || key.starts_with("DOCUCONF_")
+            || SYSTEM.contains(&key.as_str())
+            || declared.iter().any(|d| key.starts_with(&format!("{d}__")))
+        {
+            continue;
+        }
+        let best = declared
+            .iter()
+            .filter(|d| d.starts_with(prefix))
+            .filter_map(|d| {
+                let max = if d.len() >= 8 { 2 } else { 1 };
+                distance(key, d, max).map(|n| (n, *d))
+            })
+            .min();
+        if let Some((_, d)) = best {
+            out.push(format!("{key} is set but not declared; did you mean {d}?"));
+        } else if !prefix.is_empty() {
+            // Under the app's own prefix, any undeclared variable is a
+            // mistake or a leftover.
+            out.push(format!(
+                "{key} is set but not declared (no variable under prefix {prefix} has that name)"
+            ));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::distance;
+
+    #[test]
+    fn edit_distance() {
+        assert_eq!(distance("DATABSE_URL", "DATABASE_URL", 2), Some(1));
+        assert_eq!(distance("REQUEST_TIMEOUT", "REQUESTTIMEOUT", 2), Some(1));
+        assert_eq!(distance("PORT", "PORT", 2), Some(0));
+        assert_eq!(distance("HOST", "PORT", 2), Some(2));
+        assert_eq!(distance("PATH", "PORT", 2), None);
+        assert_eq!(distance("A", "ABCD", 2), None);
+    }
 }

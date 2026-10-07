@@ -1,5 +1,7 @@
 //! Boot-time loading of variables: parsing, constraints, secrets and the
 //! all-violations-together report.
+// These tests use the TLS and keystore file inputs (default features).
+#![cfg(all(feature = "tls", feature = "keystore"))]
 
 mod common;
 
@@ -378,7 +380,7 @@ fn reports_every_violation_together() {
         "{text}"
     );
     assert!(
-        text.contains("PORT: \"abc\" is not a 64-bit integer (invalid_type)"),
+        text.contains("PORT: \"abc\" is not an integer (invalid_type)"),
         "{text}"
     );
 }
