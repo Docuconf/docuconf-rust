@@ -1,0 +1,18 @@
+[package]
+name = "docuconf-readme"
+description = "Compiles and runs every Rust block in README.md as a doctest"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Only what the README tells a user to add: docuconf and serde. The axum
+# section also needs axum and tokio.
+[dependencies]
+docuconf = { path = "../docuconf" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }

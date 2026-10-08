@@ -8,22 +8,38 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+#[cfg(feature = "tls")]
 use std::time::SystemTime;
 
+#[cfg(feature = "tls")]
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer};
 
-/// A secret value. Its `Debug` output is redacted, and docuconf marks the
+/// A secret value. Its `Debug` output is redacted, and so is its
+/// `Serialize` output (`"***"`), so a `/config` endpoint or a log line that
+/// serializes the whole config struct never shows it. docuconf marks the
 /// variable `secret: true` in the contract and never prints its value.
+///
+/// `Secret` has no `PartialEq`: compare [`expose`](Secret::expose)d values
+/// deliberately (with a constant-time comparison for credentials). For
+/// zeroize-on-drop, enable the `secrecy` feature and use
+/// `secrecy::SecretString` or `secrecy::SecretBox<T>` fields instead.
 ///
 /// ```
 /// let s = docuconf::Secret::new("hunter2".to_string());
 /// assert_eq!(format!("{s:?}"), "Secret(***)");
+/// assert_eq!(serde_json::to_string(&s).unwrap(), r#""***""#);
 /// assert_eq!(s.expose(), "hunter2");
 /// ```
-#[derive(Clone, PartialEq, Eq, Default)]
+#[derive(Clone, Default)]
 pub struct Secret<T>(T);
+
+impl<T> serde::Serialize for Secret<T> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str("***")
+    }
+}
 
 impl<T> Secret<T> {
     /// Wraps a value.
@@ -124,6 +140,7 @@ fn unpark<'de, D: Deserializer<'de>, T: 'static>(d: D, what: &str) -> Result<T, 
         .map_err(|_| D::Error::custom(format!("docuconf: field type does not match the {what}")))
 }
 
+#[cfg(feature = "tls")]
 /// A TLS key pair in the `kubernetes.io/tls` layout (contract type `tls`):
 /// a directory holding `tls.crt`, `tls.key` and optionally `ca.crt`.
 /// Checked at boot: the certificate parses, matches the key, is valid for
@@ -137,6 +154,7 @@ pub struct TlsKeyPair {
     pub(crate) not_after: SystemTime,
 }
 
+#[cfg(feature = "tls")]
 impl TlsKeyPair {
     /// The directory the key pair was read from.
     pub fn dir(&self) -> &Path {
@@ -160,6 +178,7 @@ impl TlsKeyPair {
     }
 }
 
+#[cfg(feature = "tls")]
 impl fmt::Debug for TlsKeyPair {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TlsKeyPair")
@@ -175,12 +194,14 @@ impl fmt::Debug for TlsKeyPair {
     }
 }
 
+#[cfg(feature = "tls")]
 impl<'de> Deserialize<'de> for TlsKeyPair {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         unpark(d, "TLS key pair")
     }
 }
 
+#[cfg(feature = "tls")]
 /// A PEM file of one or more CA certificates (contract type `caBundle`).
 #[derive(Clone)]
 pub struct CaBundle {
@@ -188,6 +209,7 @@ pub struct CaBundle {
     pub(crate) certs: Vec<CertificateDer<'static>>,
 }
 
+#[cfg(feature = "tls")]
 impl CaBundle {
     /// The file the bundle was read from.
     pub fn path(&self) -> &Path {
@@ -199,6 +221,7 @@ impl CaBundle {
     }
 }
 
+#[cfg(feature = "tls")]
 impl fmt::Debug for CaBundle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CaBundle")
@@ -208,12 +231,14 @@ impl fmt::Debug for CaBundle {
     }
 }
 
+#[cfg(feature = "tls")]
 impl<'de> Deserialize<'de> for CaBundle {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         unpark(d, "CA bundle")
     }
 }
 
+#[cfg(feature = "keystore")]
 /// A PKCS#12 keystore (contract type `keystore`), opened at boot with the
 /// password from its `password_var`.
 pub struct Keystore {
@@ -223,6 +248,7 @@ pub struct Keystore {
     pub(crate) trusted: Vec<CertificateDer<'static>>,
 }
 
+#[cfg(feature = "keystore")]
 impl Keystore {
     /// The file the keystore was read from.
     pub fn path(&self) -> &Path {
@@ -242,6 +268,7 @@ impl Keystore {
     }
 }
 
+#[cfg(feature = "keystore")]
 impl fmt::Debug for Keystore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Keystore")
@@ -253,6 +280,7 @@ impl fmt::Debug for Keystore {
     }
 }
 
+#[cfg(feature = "keystore")]
 impl<'de> Deserialize<'de> for Keystore {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         unpark(d, "keystore")

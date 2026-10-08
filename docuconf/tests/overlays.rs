@@ -1,5 +1,7 @@
 //! Config-file overlays (SPEC §4.7): export, precedence, validation,
 //! declaration checks, and an end-to-end render with the CUE meta-schema.
+// These tests use the TLS and keystore file inputs (default features).
+#![cfg(all(feature = "tls", feature = "keystore"))]
 
 mod common;
 

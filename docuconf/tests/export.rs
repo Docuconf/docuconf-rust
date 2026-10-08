@@ -1,10 +1,11 @@
 //! Contract export: golden file, determinism, `cue vet` against the
 //! meta-schema, declaration checks, and config-file profiles.
+// These tests use the TLS and keystore file inputs (default features).
+#![cfg(all(feature = "tls", feature = "keystore"))]
 
 mod common;
 
 use std::path::Path;
-use std::time::Duration;
 
 use common::{cue_vet, Gateway};
 use docuconf::figment::providers::{Format, Toml};
@@ -70,25 +71,12 @@ fn declaration_errors() {
         /// Lower-case names are not environment variable names.
         #[docuconf(env = "lower")]
         lower: String,
-        /// A required variable cannot have a default.
-        #[docuconf(required, default = 1)]
-        both: i32,
-        /// Defaults must satisfy their own constraints.
-        #[docuconf(default = 0, min = 1)]
-        port: u16,
         /// Patterns must be RE2.
         #[docuconf(pattern = "(?=x)")]
         look: String,
         /// min does not apply to strings.
         #[docuconf(min = 1)]
         str_min: String,
-        /// Secrets have no defaults.
-        #[docuconf(default = "x")]
-        token: Secret<String>,
-        no_docs: String,
-        /// Durations need humantime_serde.
-        #[docuconf(default = "5s")]
-        timeout: Duration,
         /// A file input under a reserved directory.
         #[docuconf(path = "/etc/ca.pem")]
         ca: docuconf::CaBundle,
@@ -103,26 +91,26 @@ fn declaration_errors() {
         /// Item bounds only apply to int lists.
         #[docuconf(item_min = 1)]
         names: Vec<String>,
-        /// Item bounds must leave a range.
-        #[docuconf(item_min = 10, item_max = 5)]
-        ids: Vec<i32>,
+        /// Item bounds must leave a range after narrowing to the item type.
+        #[docuconf(item_min = 300)]
+        ids: Vec<u8>,
     }
+    // Mistakes visible in the attributes and the field type (a missing
+    // description, a default that breaks its bounds or its type, a secret
+    // or required variable with a default, a Duration without
+    // humantime_serde) are compile errors; see src/compile_errors.rs.
+    // These need the whole declaration.
     let err = docuconf::check_declaration::<Bad>().unwrap_err();
     let all = err.problems.join("\n");
     for want in [
         "lower (Bad.lower): variable name must match",
-        "BOTH (Bad.both): a required variable must not have a default",
-        "PORT (Bad.port): default 0 is below min 1",
         "LOOK (Bad.look): pattern \"(?=x)\" is not valid RE2",
         "STR_MIN (Bad.str_min): attribute `min` does not apply to a string variable",
-        "TOKEN (Bad.token): a secret variable must not have a default",
-        "NO_DOCS (Bad.no_docs): needs a description",
-        "TIMEOUT (Bad.timeout): a Duration field needs #[serde(with = \"docuconf::humantime_serde\")]",
         "file input ca (Bad.ca): would be mounted at /etc",
         "file input notes (Bad.notes): reload = \"watch\" is not implemented",
         "file input ks (Bad.ks): password_var LOWER_NOT_SECRET must be a secret variable",
         "NAMES (Bad.names): attribute `item_min` does not apply to a list of strings variable",
-        "IDS (Bad.ids): item_min 10 is above item_max 5",
+        "IDS (Bad.ids): item_min 300 is above item_max 255",
     ] {
         assert!(all.contains(want), "missing {want:?} in\n{all}");
     }
