@@ -58,7 +58,8 @@ pub enum LogLevel {
 }
 
 /// Fees charged per currency.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, docuconf::JsonSchema)]
+#[schemars(crate = "docuconf::schemars")]
 #[serde(deny_unknown_fields)]
 pub struct Fees {
     /// Fee in basis points, keyed by ISO currency code.
@@ -82,6 +83,6 @@ fn main() {
     }
 
     // At boot the service would call:
-    //     let config: Config = docuconf::load()?;
+    //     let config: Config = docuconf::load_or_exit();
     // which reads the environment and files and fails with every violation.
 }

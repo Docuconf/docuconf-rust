@@ -74,25 +74,39 @@ jobs:
 
       - name: Clippy
         if: matrix.rust == 'stable'
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo clippy -p docuconf --all-targets --no-default-features --locked -- -D warnings
 
+      # The README crate's doctests compile every Rust block in README.md
+      # (and run the test blocks) with only docuconf and serde as
+      # dependencies.
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-features --locked
         env:
           DOCUCONF_SPEC_CUE: ${{ github.workspace }}/docuconf-go/spec/cue
           DOCUCONF_REQUIRE_VET: "1"
           DOCUCONF_CONFORMANCE: ${{ github.workspace }}/docuconf-go/conformance/cases.json
           DOCUCONF_REQUIRE_CONFORMANCE: "1"
 
+      # An env-only service: no rustls, ring, webpki, x509-parser or PKCS#12.
+      - name: Test without default features
+        run: |
+          cargo test -p docuconf --no-default-features --lib --tests --locked
+          ! cargo tree -p docuconf --no-default-features -e normal --locked | grep -E '^.*(rustls|ring|x509-parser|p12-keystore) v'
+        env:
+          DOCUCONF_CONFORMANCE: ${{ github.workspace }}/docuconf-go/conformance/cases.json
+          DOCUCONF_REQUIRE_CONFORMANCE: "1"
+
       - name: Docs
         if: matrix.rust == 'stable'
-        run: cargo doc --workspace --no-deps --locked
+        run: cargo doc --workspace --no-deps --all-features --locked
         env:
           RUSTDOCFLAGS: -D warnings
 
       - name: Package
         if: matrix.rust == 'stable'
-        run: cargo package --workspace --exclude orders --locked
+        run: cargo package --workspace --exclude orders --exclude docuconf-readme --locked
 
   # examples/orders: builds against the SDK in this repository, keeps its
   # committed contract.cue in step with the code, and boots.
@@ -132,10 +146,7 @@ jobs:
 
       - name: Contract is up to date
         working-directory: examples/orders
-        run: |
-          cargo run --locked --quiet -p orders -- export "$RUNNER_TEMP/contract.cue"
-          diff -u contract.cue "$RUNNER_TEMP/contract.cue" \
-            || { echo "contract.cue is stale: run 'cargo run -p orders -- export contract.cue' in examples/orders"; exit 1; }
+        run: cargo run --locked --quiet -p orders -- export --check contract.cue
 
       - name: Vet the contract
         run: |

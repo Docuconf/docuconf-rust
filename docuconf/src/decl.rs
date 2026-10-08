@@ -8,7 +8,7 @@ use std::time::Duration;
 use regex::Regex;
 
 use crate::__private::{FieldAttrs, Lit};
-use crate::duration::{format_go, parse_duration};
+use crate::duration::parse_duration;
 use crate::error::DeclarationError;
 use crate::value::{self, Typed};
 
@@ -611,7 +611,7 @@ impl DeclCx {
                     }
                 },
                 Some(other) => {
-                    problems.push(format!("{which}: {other:?} is not an integer"));
+                    problems.push(format!("{which}: {} is not an integer", other.show()));
                     None
                 }
             };
@@ -986,6 +986,7 @@ pub(crate) fn declaration<C: crate::Docuconf>() -> Result<Declaration, Declarati
 }
 
 /// Canonical Go form of a duration, for messages.
+#[cfg(feature = "tls")]
 pub(crate) fn go(d: Duration) -> String {
-    format_go(d)
+    crate::duration::format_go(d)
 }

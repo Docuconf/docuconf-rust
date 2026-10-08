@@ -4,6 +4,7 @@
 //! ```sh
 //! DATABASE_URL=postgres://orders:pw@localhost:5432/orders cargo run -p orders
 //! cargo run -p orders -- export contract.cue
+//! cargo run -p orders -- export --check contract.cue
 //! ```
 
 use std::io::{BufRead, BufReader, Write};
@@ -65,26 +66,19 @@ enum LogLevel {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("export") {
-        let out = args.get(1).map_or("contract.cue", String::as_str);
-        let meta = Meta {
-            package: Some("orders".into()),
-            ..Meta::new("orders-api")
-        };
-        match docuconf::export::<Config>(&meta) {
-            Ok(cue) => std::fs::write(out, cue).expect("write the contract"),
-            Err(e) => exit(e),
-        }
-        return;
-    }
+    // `orders export [--check] [PATH]` writes (or checks) the contract and
+    // exits; any other invocation carries on.
+    docuconf::export_command::<Config>(&Meta::new("orders-api").package("orders"));
 
     // Reads the environment and runs every check in one pass. On failure it
-    // reports every violation at once, each with a stable code such as
-    // missing_required, and never prints a secret's value.
-    let config: Config = docuconf::load().unwrap_or_else(|e| exit(e));
+    // prints every problem at once, each with a stable code such as
+    // missing_required, never a secret's value, and exits 1.
+    let config: Config = docuconf::load_or_exit();
 
-    let listener = TcpListener::bind(("0.0.0.0", config.port)).unwrap_or_else(|e| exit(e));
+    let listener = TcpListener::bind(("0.0.0.0", config.port)).unwrap_or_else(|e| {
+        eprintln!("orders: cannot listen on port {}: {e}", config.port);
+        std::process::exit(1)
+    });
     // docuconf has checked the URL and its scheme; only its host is printed.
     let db = docuconf::url::Url::parse(config.database_url.expose()).expect("a checked URL");
     println!(
@@ -112,11 +106,6 @@ fn main() {
     }
 }
 
-fn exit(e: impl std::fmt::Display) -> ! {
-    eprintln!("{e}");
-    std::process::exit(1)
-}
-
 /// Answers one HTTP/1.1 request and closes the connection.
 fn serve(mut stream: TcpStream, config: &Config) -> std::io::Result<()> {
     stream.set_read_timeout(Some(config.request_timeout))?;
@@ -142,12 +131,13 @@ fn serve(mut stream: TcpStream, config: &Config) -> std::io::Result<()> {
     )
 }
 
-/// The loaded configuration, with typed values and the secret redacted.
+/// The loaded configuration, with typed values. `Secret` serializes as
+/// `"***"`, so the database URL is redacted.
 fn config_json(c: &Config) -> String {
     serde_json::json!({
         "PORT": c.port,
         "LOG_LEVEL": c.log_level,
-        "DATABASE_URL": "***",
+        "DATABASE_URL": c.database_url,
         "ALLOWED_ORIGINS": c.allowed_origins,
         "REQUEST_TIMEOUT": docuconf::format_go(c.request_timeout),
         "WORKER_COUNT": c.worker_count,

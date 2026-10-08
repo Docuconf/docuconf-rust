@@ -6,8 +6,8 @@ declared with docuconf. It shows the three things the Rust SDK gives an app:
 - a normal serde struct, with `#[derive(Docuconf)]` and `#[docuconf(...)]`
   attributes for descriptions, secrets and constraints
   ([`src/main.rs`](src/main.rs));
-- one check at boot, `docuconf::load()`, that reports every problem at once
-  with stable codes;
+- one check at boot, `docuconf::load_or_exit()`, that reports every problem
+  at once with stable codes and exits 1;
 - a CUE contract exported from the struct, for the platform to validate
   before it deploys ([`contract.cue`](contract.cue)). Each `///` comment's
   first paragraph is a variable's `description` and the rest its `details`
@@ -58,13 +58,17 @@ $ echo $?
 
 ## Export the contract
 
-`contract.cue` is generated; never edit it by hand. The app exports its own
-contract with `docuconf::export`, so re-export it after changing the struct
-(CI fails if it is out of date):
+`contract.cue` is generated; never edit it by hand. `main` starts with
+`docuconf::export_command`, so the binary exports its own contract. Re-export
+it after changing the struct; CI runs the `--check` form, which exits 1 and
+shows the first difference when the committed file is stale:
 
 ```console
 $ cd examples/orders
-$ cargo run -p orders -- export contract.cue
+$ cargo run -q -p orders -- export contract.cue
+docuconf: wrote contract.cue
+$ cargo run -q -p orders -- export --check contract.cue
+docuconf: contract.cue is up to date
 ```
 
 ## Deploy
@@ -76,4 +80,4 @@ missing value, secret given as a literal or policy violation, and
 platform can use the
 [docuconf Helm chart](https://github.com/docuconf/docuconf-go/tree/main/helm),
 which generates a `values.schema.json` from the contract. At boot,
-`docuconf::load()` checks the same rules again.
+`docuconf::load_or_exit()` checks the same rules again.

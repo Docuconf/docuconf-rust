@@ -1,5 +1,6 @@
-//! Durations: parsed with `humantime` (as `humantime_serde` does when
-//! figment deserializes the field), written in canonical Go form.
+//! Durations: parsed with Go's `time.ParseDuration` grammar (the platform's
+//! `docuconf vet` is written in Go, so a value that boots must also vet),
+//! written in canonical Go form.
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -8,15 +9,90 @@ use regex::Regex;
 
 use crate::decl::DurationEncoding;
 
-/// Parses a duration the way the host does. `humantime` accepts every Go
-/// duration the platform renders (`1m30s`, `720h`, `250ms`, `90us`), so the
-/// contract records the `go` encoding.
-/// Surrounding whitespace is rejected, since values are never trimmed.
+const GO_HINT: &str = "is not a duration such as \"1m30s\"";
+const GO_UNITS: &str = "ns, us, ms, s, m or h";
+
+/// Parses a Go duration (`1m30s`, `720h`, `250ms`, `1.5h`, `90us`), exactly
+/// as Go's `time.ParseDuration` does, except that a negative duration is
+/// rejected. Units Go does not know (`2d`, `1 hour`), which `humantime`
+/// would accept, are rejected, so a value that boots also passes the
+/// platform's `docuconf vet`. Surrounding whitespace is rejected, since
+/// values are never trimmed. Messages never repeat the value.
 pub(crate) fn parse_duration(s: &str) -> Result<Duration, String> {
+    let bad = |why: &str| format!("{GO_HINT} ({why})");
     if s.trim() != s {
-        return Err("is not a duration such as \"1m30s\" (it has surrounding whitespace)".into());
+        return Err(bad("it has surrounding whitespace"));
     }
-    humantime::parse_duration(s).map_err(|_| "is not a duration such as \"1m30s\"".to_string())
+    let mut rest = s;
+    if let Some(r) = rest.strip_prefix('+') {
+        rest = r;
+    } else if rest.starts_with('-') {
+        return Err(bad("it is negative"));
+    }
+    if rest == "0" {
+        return Ok(Duration::ZERO);
+    }
+    if rest.is_empty() {
+        return Err(GO_HINT.to_string());
+    }
+    const MAX: u128 = i64::MAX as u128;
+    let mut total: u128 = 0;
+    while !rest.is_empty() {
+        let int_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let (int, r) = rest.split_at(int_len);
+        rest = r;
+        let mut frac = "";
+        if let Some(r) = rest.strip_prefix('.') {
+            let n = r.bytes().take_while(u8::is_ascii_digit).count();
+            frac = &r[..n];
+            rest = &r[n..];
+        }
+        if int.is_empty() && frac.is_empty() {
+            return Err(GO_HINT.to_string());
+        }
+        let unit_len = rest
+            .char_indices()
+            .find(|(_, c)| *c == '.' || c.is_ascii_digit())
+            .map_or(rest.len(), |(i, _)| i);
+        let (unit, r) = rest.split_at(unit_len);
+        rest = r;
+        let unit: u128 = match unit {
+            "ns" => 1,
+            "us" | "\u{b5}s" | "\u{3bc}s" => 1_000,
+            "ms" => 1_000_000,
+            "s" => 1_000_000_000,
+            "m" => 60_000_000_000,
+            "h" => 3_600_000_000_000,
+            "" => return Err(bad(&format!("every number needs a unit: {GO_UNITS}"))),
+            _ => return Err(bad(&format!("Go durations only know {GO_UNITS}"))),
+        };
+        let whole: u128 = if int.is_empty() {
+            0
+        } else {
+            int.parse::<u128>()
+                .ok()
+                .filter(|v| *v <= MAX)
+                .ok_or_else(|| bad("it is too large"))?
+        };
+        let mut n = whole
+            .checked_mul(unit)
+            .ok_or_else(|| bad("it is too large"))?;
+        if !frac.is_empty() {
+            // As Go: fractional digits beyond what fits are dropped, and the
+            // result is truncated to whole nanoseconds.
+            let f = &frac[..frac.len().min(18)];
+            let scale = 10u128.pow(f.len() as u32);
+            n += f.parse::<u128>().unwrap_or(0) * unit / scale;
+        }
+        total = total.checked_add(n).ok_or_else(|| bad("it is too large"))?;
+        if total > MAX {
+            return Err(bad("it is too large"));
+        }
+    }
+    Ok(Duration::new(
+        (total / 1_000_000_000) as u64,
+        (total % 1_000_000_000) as u32,
+    ))
 }
 
 /// Parses a duration in one of the wire encodings of SPEC §5.
@@ -174,6 +250,42 @@ mod tests {
         assert!(parse_duration("1s\n").is_err());
         assert!(parse_duration("").is_err());
         assert!(parse_duration("abc").is_err());
+        // Go's other forms.
+        assert_eq!(parse_duration("0").unwrap(), Duration::ZERO);
+        assert_eq!(parse_duration("+5s").unwrap(), Duration::from_secs(5));
+        assert_eq!(parse_duration(".5s").unwrap(), Duration::from_millis(500));
+        assert_eq!(parse_duration("1.s").unwrap(), Duration::from_secs(1));
+        assert_eq!(
+            parse_duration("2\u{b5}s").unwrap(),
+            Duration::from_micros(2)
+        );
+        assert_eq!(
+            parse_duration("2\u{3bc}s").unwrap(),
+            Duration::from_micros(2)
+        );
+        assert_eq!(
+            parse_duration("2562047h47m16s854775807ns").unwrap(),
+            Duration::from_nanos(i64::MAX as u64)
+        );
+    }
+
+    #[test]
+    fn rejects_what_go_rejects() {
+        // humantime reads all of these; Go's time.ParseDuration does not.
+        for bad in [
+            "2d", "1 hour", "1hour", "5sec", "1w", "1y", "10", "1h 30m", "1M", "-1s", ".s", "s",
+            "1.5", "2562048h",
+        ] {
+            assert!(parse_duration(bad).is_err(), "{bad} should be rejected");
+        }
+        let e = parse_duration("2d").unwrap_err();
+        assert!(e.contains("ns, us, ms, s, m or h"), "{e}");
+        assert!(
+            !e.contains("2d"),
+            "the message must not repeat the value: {e}"
+        );
+        let e = parse_duration("30").unwrap_err();
+        assert!(e.contains("every number needs a unit"), "{e}");
     }
 
     #[test]

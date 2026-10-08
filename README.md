@@ -8,24 +8,38 @@ JSON/YAML/TOML config files, text and binary files.
 
 Part of [docuconf](https://github.com/docuconf). See the
 [specification](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md).
+**Example:** [`examples/orders/`](examples/orders), a small HTTP service with its declaration, exported contract
+and boot-time errors.
 
-**Example:** [`examples/orders/`](https://github.com/docuconf/docuconf-rust/tree/main/examples/orders), a small HTTP service with its declaration, exported
-contract and boot-time errors.
+> **Status:** `0.1.0`, not yet on crates.io. The contract format is a draft (`v1alpha1`) and the API may change.
 
-> **Status:** `0.1.0`. The contract format is a draft (`v1alpha1`) and the API may change.
+## Install
 
-## Why figment
+Until the first release is published, depend on this repository with git:
 
-figment is how Rust services already layer configuration (Rocket uses it): serde structs, file providers with
-named profiles (`[default]`, `[production]`), and the environment on top. That maps directly onto the spec's
-always-loaded base file, profile files and platform-supplied variables, so docuconf builds on it rather than on
-`envy` (environment only) or `config` (which layers sources but has no named profiles).
+```sh
+cargo add docuconf --git https://github.com/docuconf/docuconf-rust
+cargo add serde --features derive
+```
 
-## Declare
+That is all a config struct needs: `docuconf` re-exports figment, schemars and url at the versions it uses.
+`cargo add docuconf serde --features serde/derive` will work once `0.1.0` is on crates.io.
 
-```rust
+A service that reads only environment variables can drop the TLS stack (rustls, ring, webpki, x509-parser,
+PKCS#12), which only the `TlsKeyPair`, `CaBundle` and `Keystore` file inputs need:
+
+```sh
+cargo add docuconf --git https://github.com/docuconf/docuconf-rust --no-default-features
+```
+
+## Declare and load
+
+`src/main.rs`:
+
+```rust,no_run
 use std::time::Duration;
-use docuconf::{ConfigFile, Docuconf, DocuconfEnum, Secret, TlsKeyPair};
+
+use docuconf::{ConfigFile, Docuconf, DocuconfEnum, Secret};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Docuconf)]
@@ -47,22 +61,28 @@ pub struct Config {
     #[serde(with = "docuconf::humantime_serde")]
     pub request_timeout: Duration,
 
-    /// Certificate the service serves HTTPS with.
-    #[docuconf(path = "/etc/billing/tls", dns_names("billing.internal"), min_remaining = "720h")]
-    pub serving_tls: TlsKeyPair,
-
     /// Fee schedule, one entry per currency.
     #[docuconf(path = "/etc/billing/fees/fees.yaml", path_env = "FEES_FILE")]
-    pub fees: ConfigFile<Fees>,
+    pub fees: Option<ConfigFile<Fees>>,
 }
 
 #[derive(Debug, Deserialize, DocuconfEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel { Debug, Info, Warn, Error }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, docuconf::JsonSchema)]
+#[schemars(crate = "docuconf::schemars")]
 pub struct Fees {
     pub basis_points: std::collections::BTreeMap<String, u32>,
+}
+
+fn main() {
+    // `<program> export [--check] contract.cue` writes or checks the contract, then exits.
+    docuconf::export_command::<Config>(&docuconf::Meta::new("billing-api"));
+
+    // Every check, in one pass. On failure: the report on stderr, exit status 1.
+    let config: Config = docuconf::load_or_exit();
+    println!("listening on :{} (log level {:?})", config.port, config.log_level);
 }
 ```
 
@@ -71,6 +91,10 @@ characters, joined onto one line; a trailing period is dropped), and the rest of
 CommonMark used only in generated docs, never at runtime, at most 4000 characters:
 
 ```rust
+use std::time::Duration;
+
+#[derive(serde::Deserialize, docuconf::Docuconf)]
+pub struct Config {
     /// Upstream request timeout.
     ///
     /// The gateway gives up after this long and answers 504. Keep it below the
@@ -83,6 +107,7 @@ CommonMark used only in generated docs, never at runtime, at most 4000 character
     #[docuconf(default = "30s", min = "1s", max = "5m")]
     #[serde(with = "docuconf::humantime_serde")]
     pub request_timeout: Duration,
+}
 ```
 
 exports
@@ -105,7 +130,187 @@ description, or details that are blank or over 4000 characters (Unicode code poi
 `docuconf docs` (in the [docuconf CLI](https://github.com/docuconf/docuconf-go)) generates CONFIG.md and
 CONFIG.agents.md from the exported contract; the SDK only exports the text.
 
-A field that is not an `Option` and has no `default` is required. The Rust type picks the contract type:
+A field that is not an `Option` and has no `default` is required. The Rust type picks the contract type, and the
+variable name is the field name in upper case: `PORT`, `DATABASE_URL`. `Secret<T>` marks a variable secret: its
+`Debug` and `Serialize` output is `***`, and docuconf never prints its value.
+
+The derive catches declaration mistakes **at compile time**: a missing description, a default of the wrong type
+or outside its bounds, a secret or `required` variable with a default, a `Duration` without
+`humantime_serde`, a misspelt attribute, a field type docuconf cannot declare:
+
+```text
+error[E0080]: evaluation panicked: docuconf: Config.port: default "abc" is not an integer; u16 needs a default such as 8080
+error: docuconf: Config.workers: default 100 is above max 64; lower the default or raise max
+error: docuconf: unknown attribute `defualt`
+```
+
+## See an error
+
+Run it without `DATABASE_URL` and with a bad `PORT`:
+
+```console
+$ PORT=80x cargo run
+docuconf: 2 configuration problems:
+  DATABASE_URL: is required but not set (missing_required)
+  PORT: "80x" is not an integer (invalid_type)
+$ echo $?
+1
+```
+
+Every problem is reported at once, sorted by name, each with the spec's stable code. Secret values never
+appear. The report is also written to `/dev/termination-log` when it exists (or to `DOCUCONF_TERMINATION_LOG`),
+so `kubectl describe pod` shows it.
+
+A variable that is set but not declared, and is one or two edits away from a declared name, gets a warning on
+stderr (the value is never shown):
+
+```text
+docuconf: DATABSE_URL is set but not declared; did you mean DATABASE_URL?
+```
+
+`Loader::on_warning` routes warnings elsewhere, for example `.on_warning(|w| tracing::warn!("{w}"))`.
+
+If you prefer `?`, `docuconf::load::<Config>()` returns a `docuconf::Error` whose `Debug` is the same report and
+which has no `source()`, so `fn main() -> Result<(), Box<dyn Error>>` and `anyhow::Result` both print it once.
+
+## Test your config
+
+`Loader::env` takes the whole environment as a map. It neither reads nor changes the process environment, starts
+no threads, and writes no termination log, so tests can run in parallel. Put `DOCUCONF_FILE_ROOT` in the map to
+read file inputs from a test directory.
+
+`tests/config.rs`:
+
+```rust,test_harness
+use docuconf::{Code, Docuconf, Loader, Secret};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize, Docuconf)]
+pub struct Config {
+    /// HTTP listen port.
+    #[docuconf(default = 8080, min = 1)]
+    pub port: u16,
+
+    /// Primary Postgres connection string.
+    #[docuconf(schemes("postgres"))]
+    pub database_url: Secret<String>,
+}
+
+#[test]
+fn loads_a_valid_environment() {
+    let config = Loader::<Config>::new()
+        .env([("DATABASE_URL", "postgres://app@db/app"), ("PORT", "9090")])
+        .load()
+        .unwrap();
+    assert_eq!(config.port, 9090);
+}
+
+#[test]
+fn reports_every_problem() {
+    let err = Loader::<Config>::new().env([("PORT", "0")]).load().unwrap_err();
+    assert_eq!(err.violations().len(), 2);
+    assert!(err.has(Code::MissingRequired));
+    assert!(err.has(Code::OutOfRange));
+}
+```
+
+## Export the contract
+
+The platform validates values against `contract.cue`, which the app exports from its own struct. With
+`export_command` at the top of `main` (see [Declare and load](#declare-and-load)):
+
+```sh
+cargo run -- export contract.cue          # write it; commit it next to the code
+cargo run -- export --check contract.cue  # in CI: exit 1, showing the first difference, when it is stale
+```
+
+The same check as a unit test, if you would rather not have an export path in the production binary
+(`UPDATE_CONTRACT=1 cargo test` rewrites the file):
+
+```rust,no_run,test_harness
+use docuconf::Docuconf;
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize, Docuconf)]
+pub struct Config {
+    /// HTTP listen port.
+    #[docuconf(default = 8080, min = 1)]
+    pub port: u16,
+}
+
+#[test]
+fn contract_is_current() {
+    docuconf::assert_contract::<Config>(&docuconf::Meta::new("billing-api"), "contract.cue");
+}
+```
+
+The output is plain CUE data that unifies with the meta-schema's `#Contract` (`generator.language: "rust"`),
+variables and files sorted by name, and is deterministic. Warnings (feature-flag-like names such as `ENABLE_*`,
+config-file keys that are not declared) are printed by the command; `Loader::export_with_warnings` returns them.
+`Meta::new(name).app_version("1.4.0").package("billing")` sets the metadata.
+
+## Deploy
+
+Ship `contract.cue` with the app. The platform checks its inputs against it before anything reaches the
+cluster: `docuconf vet` reports every bad or missing value, secret given as a literal or policy violation, and
+`docuconf render` turns valid inputs into the pod's env. A Helm-based platform can use the
+[docuconf Helm chart](https://github.com/docuconf/docuconf-go/tree/main/helm), which generates a
+`values.schema.json` from the contract. At boot, `load_or_exit` checks the same rules again.
+
+## With axum
+
+There is nothing to plug in: load the config in plain `main` before building the tokio runtime, so a bad
+config exits before anything starts and the config can size the runtime, then share it as axum state.
+
+```rust,no_run
+use std::sync::Arc;
+
+use axum::{extract::State, routing::get, Router};
+use docuconf::Docuconf;
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize, Docuconf)]
+struct Config {
+    /// HTTP listen port.
+    #[docuconf(default = 8080, min = 1)]
+    port: u16,
+
+    /// Threads serving requests.
+    #[docuconf(default = 4, min = 1, max = 64)]
+    worker_count: u8,
+}
+
+fn main() {
+    docuconf::export_command::<Config>(&docuconf::Meta::new("orders-api"));
+    let config = Arc::new(docuconf::load_or_exit::<Config>());
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.worker_count.into())
+        .enable_all()
+        .build()
+        .expect("start the tokio runtime")
+        .block_on(serve(config));
+}
+
+async fn serve(config: Arc<Config>) {
+    let app = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/port", get(|State(c): State<Arc<Config>>| async move { c.port.to_string() }))
+        .with_state(Arc::clone(&config));
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", config.port))
+        .await
+        .expect("bind the port");
+    axum::serve(listener, app).await.expect("serve");
+}
+```
+
+With `#[tokio::main]` instead, call `load_or_exit` as the first line of `async fn main`; it does no I/O beyond
+reading the environment and the declared files.
+
+---
+
+# Reference
+
+## Types
 
 | Field type | Contract |
 |---|---|
@@ -114,35 +319,50 @@ A field that is not an `Option` and has no `default` is required. The Rust type 
 | `f32`, `f64` | `float` (NaN and infinity rejected) |
 | `bool` | `bool` (`true`/`false`, any case) |
 | `std::time::Duration` + `#[serde(with = "docuconf::humantime_serde")]` | `duration`, encoding `go` |
-| `url::Url` | `url` (`schemes`, `max_length`) |
+| `Option<Duration>` + `#[serde(default, with = "docuconf::humantime_serde::option")]` | optional `duration` |
+| `url::Url` (`docuconf::url::Url`) | `url` (`schemes`, `max_length`) |
 | `#[derive(DocuconfEnum)]` enum | `enum`, values after serde renames |
 | `Vec<String>`, `Vec<u16>`... | `list`, encoding `json` (`min_items`, `max_items`); string items take `item_min_length`/`item_max_length`; an int item type narrower than 64 bits exports its range as `itemMin`/`itemMax` |
 | `docuconf::Json<T>` (`T: JsonSchema`) | `json`, with the schema from `T` (`max_length`) |
-| `docuconf::Secret<T>` | `T` with `secret: true`; `Debug` prints `Secret(***)` |
+| `docuconf::Secret<T>` | `T` with `secret: true`; `Debug` prints `Secret(***)`, `Serialize` writes `"***"` |
+| `secrecy::SecretString`, `secrecy::SecretBox<T>` (feature `secrecy`) | `string` / `T` with `secret: true`, zeroized on drop |
 | `Option<T>` | optional |
 | nested `#[derive(Docuconf)]` struct | its variables, as `PARENT__CHILD` |
 | `ConfigFile<T>` (`T: Deserialize + JsonSchema`) | file `config` (`format` from the extension or `format = "..."`) |
-| `TlsKeyPair` | file `tls`: `dns_names`, `key_algorithms`, `min_remaining`, `require_ca` |
-| `CaBundle` | file `caBundle`: `min_certificates` |
-| `Keystore` | file `keystore` (PKCS#12): `password_var` names a secret variable |
+| `TlsKeyPair` (feature `tls`) | file `tls`: `dns_names`, `key_algorithms`, `min_remaining`, `require_ca` |
+| `CaBundle` (feature `tls`) | file `caBundle`: `min_certificates` |
+| `Keystore` (feature `keystore`) | file `keystore` (PKCS#12): `password_var` names a secret variable |
 | `TextFile` | file `text`: `pattern`, `min_length`, `max_length` |
 | `BinaryFile` | file `binary` |
 
-Variable attributes: `default`, `required`, `secret`, `min`, `max`, `min_length`, `max_length`, `pattern` (RE2,
-matches anywhere: anchor with `^`/`$`), `values`, `schemes`, `min_items`, `max_items`, `item_min`, `item_max`, `item_min_length`, `item_max_length`, `group`, `examples`,
-`deprecated`, `replaced_by`, `config_key`, `env`, `description`, `details`, `skip`. File attributes: `path` (required),
-`name` (input name; default is the field name with `-`), `path_env`, `reload` (only `"restart"`; `"watch"` is not
-implemented yet and is rejected), `max_size` (`65536` or `"64Ki"`), `required`, `secret`, `description`, `details`, `group`, `deprecated`,
-plus the type-specific ones above.
+For `ConfigFile<T>` and `Json<T>`, derive `docuconf::JsonSchema` with `#[schemars(crate = "docuconf::schemars")]`
+as in the first example; then the app needs no `schemars` dependency. (If the app depends on `schemars` 1.x
+itself, a plain `#[derive(schemars::JsonSchema)]` works too.)
 
-`item_min` and `item_max` bound each item of an int list, and an item outside them is `out_of_range` at boot. They
-are narrowed to the item type, as `min`/`max` are for an int variable, so `Vec<u16>` always exports
+A field type docuconf cannot declare is a compile error: ``HashMap<String, String>` is not a docuconf input
+type``. Use `Json<HashMap<..>>` for a map, or `#[docuconf(skip)]` to load the field some other way.
+
+## Attributes
+
+Variable attributes: `default`, `required`, `secret`, `min`, `max`, `min_length`, `max_length`, `pattern` (RE2,
+matches anywhere: anchor with `^`/`$`), `values`, `schemes`, `min_items`, `max_items`, `item_min`, `item_max`,
+`item_min_length`, `item_max_length`, `group`, `examples`, `deprecated`, `replaced_by`, `config_key`, `env`,
+`description`, `details`, `skip`. File attributes: `path` (required), `name` (input name; default is the field name with
+`-`), `path_env`, `reload` (only `"restart"`; `"watch"` is not implemented yet and is rejected), `max_size`
+(`65536` or `"64Ki"`), `required`, `secret`, `description`, `details`, `group`, `deprecated`, plus the type-specific ones above. The struct
+takes `prefix`.
+
+`item_min` and `item_max` bound each item of an int list, and an item outside them is `out_of_range` at boot.
+They are narrowed to the item type, as `min`/`max` are for an int variable, so `Vec<u16>` always exports
 `itemMin: 0, itemMax: 65535` or tighter:
 
 ```rust
-/// Shard ids this instance owns.
-#[docuconf(item_min = 0, item_max = 1023)]
-pub shards: Vec<u16>,
+#[derive(serde::Deserialize, docuconf::Docuconf)]
+pub struct Sharding {
+    /// Shard ids this instance owns.
+    #[docuconf(item_min = 0, item_max = 1023)]
+    pub shards: Vec<u16>,
+}
 ```
 
 Lengths count characters (Unicode code points, as `chars().count()` does), never bytes: `"日本"` is 2 and
@@ -153,52 +373,41 @@ string list after it is split, so separators never count. Every one of them is `
 secret reports its length, never its value:
 
 ```rust
-/// Where to report each run.
-#[docuconf(schemes = "https", max_length = 40)]
-pub callback: String,
-/// Branch codes, two to four characters each.
-#[docuconf(item_min_length = 2, item_max_length = 4)]
-pub branches: Vec<String>,
+#[derive(serde::Deserialize, docuconf::Docuconf)]
+pub struct Reporting {
+    /// Where to report each run.
+    #[docuconf(schemes = "https", max_length = 40)]
+    pub callback: docuconf::url::Url,
+    /// Branch codes, two to four characters each.
+    #[docuconf(item_min_length = 2, item_max_length = 4)]
+    pub branches: Vec<String>,
+}
 ```
 
-Mistakes (a bad name, a default outside its own range, a pattern with
-lookaround, a file mounted over `/etc`) are reported by `docuconf::check_declaration::<Config>()`, by export and
-by load.
+Mistakes that need the whole declaration (a bad or duplicate name, a pattern with lookaround, a duration default
+above its max, a file mounted over `/etc`) are reported by `docuconf::check_declaration::<Config>()`, by export
+and by load.
 
-### Names
+## Names
 
 Variable names follow figment's `Env::prefixed(prefix).split("__")`: the struct's
 `#[docuconf(prefix = "APP_")]` (empty by default), then the serde key in upper case, with `__` between nesting
 levels. `cache.ttl` under prefix `APP_` is `APP_CACHE__TTL`. `#[docuconf(env = "NAME")]` overrides one name.
 
-### Wire formats
+The serde key is upper-cased as it is, with no `_` inserted: under `#[serde(rename_all = "camelCase")]` the field
+`request_timeout` is the key `requestTimeout` and the variable `REQUESTTIMEOUT`. Give such fields
+`#[docuconf(env = "REQUEST_TIMEOUT")]`; at boot, a set `REQUEST_TIMEOUT` gets a "did you mean" warning.
+
+## Wire formats
 
 docuconf reads the declared variables itself and hands figment typed values. figment's own `Env` provider trims
 values and guesses types (`8080` is a number even for a `String` field), which the spec forbids, so do not add
 it alongside docuconf. Values are never trimmed; an empty value is unset for every type except `string`; lists
 are JSON arrays (`["a","b"]`, which figment's `Env` also reads), so the contract says `encoding: "json"`;
-durations are parsed with `humantime`, which reads Go syntax such as `1m30s`, so the contract says
-`encoding: "go"`.
+durations use Go's syntax, exactly what Go's `time.ParseDuration` accepts (`1m30s`, `1.5h`, `250ms`; not `2d`
+or `1 hour`, which the platform's `docuconf vet` would reject), so the contract says `encoding: "go"`.
 
-## Validate at boot
-
-```rust
-let config: Config = docuconf::load()?;
-```
-
-`load` reads the process environment and every file input, and fails with **all** violations, each with the
-spec's stable code. Secret values never appear:
-
-```text
-docuconf: 3 configuration problems:
-  DATABASE_URL: value has scheme mysql, not one of postgres, postgresql (invalid_scheme)
-  PORT: "80x" is not a 64-bit integer (invalid_type)
-  serving-tls: certificate expires at 2026-12-20T00:00:00Z, in 288h, less than minRemaining 720h (certificate_expiring)
-```
-
-The violations are also written to `/dev/termination-log` when it exists (or to `DOCUCONF_TERMINATION_LOG`), so
-`kubectl describe pod` shows them. `DOCUCONF_FILE_ROOT` is prepended to every absolute file path, including paths
-read from a `path_env` variable, for local development and tests.
+## File inputs
 
 File checks: the file exists, is readable and within `max_size`; config files parse (figment's JSON/YAML/TOML
 parsers; a UTF-8 BOM is accepted), match the `schemars` schema (checked with `jsonschema`) and bind to `T`;
@@ -207,7 +416,18 @@ parsers; a UTF-8 BOM is accepted), match the `schemars` schema (checked with `js
 and, with `require_ca`, chains to `ca.crt` (webpki); CA bundles have `min_certificates` certificates; PKCS#12
 keystores open with their password (`p12-keystore`); text files are UTF-8 and match their constraints.
 
-### Injected secrets
+`DOCUCONF_FILE_ROOT` is prepended to every absolute file path, including paths read from a `path_env` variable,
+for local development and tests.
+
+## Cargo features
+
+| Feature | Default | Adds |
+|---|---|---|
+| `tls` | yes | `TlsKeyPair` and `CaBundle` (rustls, ring, webpki, x509-parser) |
+| `keystore` | yes | `Keystore`, PKCS#12 (implies `tls`) |
+| `secrecy` | no | `secrecy::SecretString` and `secrecy::SecretBox<T>` as secret fields |
+
+## Injected secrets
 
 Platforms often inject values when the container starts: Bank-Vaults' `vault-env` resolves `vault:` references,
 `op run` resolves `op://` ones, operators add variables. docuconf reads the environment as the process sees it,
@@ -219,46 +439,80 @@ When the injector did not run, a secret variable still holds the raw reference; 
 DATABASE_URL: holds an unresolved vault: reference; the injector that should resolve it did not run (invalid_type)
 ```
 
-### Config files and profiles
+## Config files and profiles
 
 Give the loader your figment file layers and the variable that selects the profile:
 
-```rust
-use docuconf::figment::{Figment, providers::{Format, Toml}};
+```rust,no_run
+use docuconf::figment::providers::{Format, Toml};
+use docuconf::figment::Figment;
+use docuconf::{Docuconf, Loader};
+use serde::Deserialize;
 
-let loader = docuconf::Loader::<Config>::new()
-    .figment(Figment::from(Toml::file("App.toml").nested()))
-    .profiles("APP_PROFILE", "production"); // APP_PROFILE must be a declared variable
-let config = loader.load()?;
+#[derive(Debug, Deserialize, Docuconf)]
+struct Config {
+    /// HTTP listen port.
+    #[docuconf(default = 8080)]
+    port: u16,
+
+    /// Selects the profile in App.toml.
+    app_profile: Option<String>,
+}
+
+fn main() {
+    let config: Config = Loader::new()
+        .figment(Figment::from(Toml::file("App.toml").nested()))
+        .profiles("APP_PROFILE", "production") // APP_PROFILE must be a declared variable
+        .load_or_exit();
+    println!("port {}", config.port);
+}
 ```
 
 Layers, lowest first: the declaration's defaults, your figment (its `[default]` and `[global]` tables are
 always loaded, a `[production]` table only when that profile is selected), then the environment, so the
-platform's variables override file values. At export, values in the always-loaded tables become the variables'
-defaults and other tables become the contract's `profiles.defaults`. A secret with a value in a config file is
-an error. Keys that are not declared variables are file-only, and export warns (through `log`) that the platform
-cannot set them. Fields you load from elsewhere (a vault, say) can be left out with `#[docuconf(skip)]`.
+platform's variables override file values. A selector value that names a profile no config file defines (and
+that is not the default) loads only base values and the environment, as the spec allows (the platform may
+supply that profile's values), with a warning naming the profiles the files do define. A selector that is not a
+declared variable is a declaration error at boot as well as at export.
+
+At export, values in the always-loaded tables become the variables' defaults and other tables become the
+contract's `profiles.defaults`. A secret with a value in a config file is an error. Keys that are not declared
+variables are file-only, and export warns that the platform cannot set them. Fields you load from elsewhere (a
+vault, say) can be left out with `#[docuconf(skip)]`.
 
 Other options: `.dotenv(".env")` reads a `.env` file for development (real variables win), `.env(map)` replaces
-the process environment in tests, `.now(time)` fixes the clock for certificate checks.
+the process environment in tests, `.now(time)` fixes the clock for certificate checks, `.termination_log(bool)`
+and `.on_warning(f)`.
 
-### Config-file overlays
+## Config-file overlays
 
 The platform can supply values in one more config file, mounted from a ConfigMap, instead of the environment
-(spec §4.7). Declare it on the loader:
+(spec §4.7). Declare it on the loader, and use the same loader for export:
 
-```rust
-use docuconf::{Meta, Overlay};
+```rust,no_run
+use docuconf::figment::providers::{Format, Toml};
+use docuconf::figment::Figment;
+use docuconf::{Docuconf, Loader, Meta, Overlay};
+use serde::Deserialize;
 
-fn loader() -> docuconf::Loader<Config> {
-    docuconf::Loader::new()
+#[derive(Debug, Deserialize, Docuconf)]
+struct Config {
+    /// HTTP listen port.
+    #[docuconf(default = 8080)]
+    port: u16,
+}
+
+fn loader() -> Loader<Config> {
+    Loader::new()
         .figment(Figment::from(Toml::file("App.toml").nested()))
-        .profiles("APP_PROFILE", "production")
         .overlay(Overlay::new("platform", "/etc/app/platform/app.toml")) // format from the extension
 }
 
-let config = loader().load()?;                          // at boot
-let cue = loader().export(&Meta::new("billing-api"))?;  // the same loader for export
+fn main() {
+    loader().export_command(&Meta::new("billing-api"));
+    let config = loader().load_or_exit();
+    println!("port {}", config.port);
+}
 ```
 
 Layers, lowest first: declaration defaults, your figment (base and selected profile), the overlay, the
@@ -276,36 +530,25 @@ holds files the app ships with (the directory of a config file in your figment, 
 the mount would hide them. `Reload::Watch` is rejected: the overlay is read once at boot, and a change rolls the
 pods.
 
-## Export
-
-```rust
-let cue = docuconf::export::<Config>(&docuconf::Meta::new("billing-api").app_version("1.4.0"))?;
-std::fs::write("contract.cue", cue)?;
-// or, with config files and profiles: loader.export(&meta)?
-```
-
-`cargo run --example export -- contract.cue` runs a complete example. The output is plain CUE data that unifies
-with the meta-schema's `#Contract` (`generator.language: "rust"`), variables and files sorted by name, and is
-deterministic. `tests/golden/gateway.cue` is a golden export that uses every variable type and every file type.
-
-Feature-flag-like names (`FF_`, `FEATURE_`, `ENABLE_`) produce a warning: flags that change without a rollout
-belong in a flag service (spec §10).
-
 ## Contract-first mode
 
 `docuconf::Contract` validates an environment against a contract given as JSON (`cue export contract.cue`), with
 no Rust declaration, and returns typed values. Use it for a contract written by hand in CUE, or to check an
 environment in a tool. It parses every wire encoding of spec §5 (lists `csv` with any `separator`, `json` and
-`indexed` as `NAME__0`, `NAME__1`..., numbered from 0 with no gap; durations `go`, `iso8601`, `seconds` and `timespan`) and runs the same checks
-as a `#[derive(Docuconf)]` struct, so both accept exactly the same values:
+`indexed` as `NAME__0`, `NAME__1`..., numbered from 0 with no gap; durations `go`, `iso8601`, `seconds` and
+`timespan`) and runs the same checks as a `#[derive(Docuconf)]` struct, so both accept exactly the same values:
 
-```rust
-let contract = docuconf::Contract::from_json(&std::fs::read_to_string("contract.json")?)?;
-let values = contract.load()?; // the process environment; or load_env([("PORT", "9090")]) in tests
-let port = values.get("PORT").and_then(|v| v.as_int());
+```rust,no_run
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let contract = docuconf::Contract::from_json(&std::fs::read_to_string("contract.json")?)?;
+    let values = contract.load()?; // the process environment; or load_env([("PORT", "9090")]) in tests
+    let port = values.get("PORT").and_then(|v| v.as_int());
+    println!("port {port:?}");
+    Ok(())
+}
 ```
 
-`load()` reports every violation together and writes them to the termination log, as `docuconf::load` does;
+`load()` reports every violation together and writes them to the termination log, as `Loader::load` does;
 `load_env(...)` takes the whole environment as a map and writes nothing. `json` variables are checked against
 their `schema`. Profiles in the contract apply; file inputs and overlays are not loaded in this mode.
 
@@ -334,13 +577,15 @@ the suite against docuconf-go `main`.
 ## Development
 
 ```sh
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-features
+cargo test -p docuconf --no-default-features --lib --tests
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all --check
 UPDATE_GOLDEN=1 cargo test --test export   # accept a changed golden export
 ```
 
-See [Conformance](#conformance) for the shared suite.
+Every Rust block in this README is compiled (and the test blocks run) by the `readme` crate's doctests, which
+depend on nothing but `docuconf` and `serde` (plus axum and tokio for the axum section).
 
 The export tests run `cue vet -c` against the meta-schema when `cue` (v0.17.1) is installed and the spec is at
 `../docuconf-go/spec/cue` or `$DOCUCONF_SPEC_CUE`; they skip otherwise (`DOCUCONF_REQUIRE_VET=1` makes that a
