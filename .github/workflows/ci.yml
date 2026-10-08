@@ -146,6 +146,7 @@ jobs:
 
       - name: Contract is up to date
         working-directory: examples/orders
+        # Ignores metadata.generator.version, which release PRs bump.
         run: cargo run --locked --quiet -p orders -- export --check contract.cue
 
       - name: Vet the contract

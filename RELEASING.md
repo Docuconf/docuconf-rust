@@ -30,13 +30,22 @@ a copy of `LICENSE` so it is packaged with the crate.
 
 ## Each release
 
-1. Update `version` in the root `Cargo.toml` (`[workspace.package]`) and the `docuconf-derive` requirement
-   (`version = "=X.Y.Z"`) in `docuconf/Cargo.toml`. Regenerate the golden export if the generator version is in
-   it: `UPDATE_GOLDEN=1 cargo test --test export`. Commit.
-2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+Releases are automated with [release-please](https://github.com/googleapis/release-please); see
+[CONTRIBUTING.md](CONTRIBUTING.md#how-releases-happen) for the commit conventions it reads.
+
+1. Merge the open release PR (`chore(main): release X.Y.Z`). It already updates `version` in the root
+   `Cargo.toml` (`[workspace.package]`, inherited by both crates), the `docuconf-derive` requirement
+   (`version = "=X.Y.Z"`) in `docuconf/Cargo.toml`, both crates in `Cargo.lock`, and `CHANGELOG.md`. The golden
+   export and the example contract do not need regenerating: their comparisons ignore
+   `metadata.generator.version`.
+2. release-please tags the merge commit `vX.Y.Z` and creates the GitHub release with the changelog entries.
 3. The workflow checks that the tag matches the workspace version, runs fmt, clippy and the full test suite
    (including `cue vet` against the meta-schema), packages both crates, then publishes `docuconf-derive` and
    `docuconf`.
+
+If the release PR was created with `GITHUB_TOKEN` (no release GitHub App configured), the tag does not trigger
+`release.yml` by itself, so `.github/workflows/release-please.yml` starts it with `gh workflow run`. To redo a
+release by hand: `gh workflow run release.yml --ref vX.Y.Z`.
 
 If the second publish fails after the first succeeded, re-run the job: `cargo publish` of an already published
 version fails, so the workflow skips a crate whose version is already on crates.io.

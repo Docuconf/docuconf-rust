@@ -627,7 +627,19 @@ pub struct Export {
     pub warnings: Vec<String>,
 }
 
-/// Compares an exported contract with the file at `path`.
+/// `cue` with the value of metadata.generator.version blanked. That value
+/// is the SDK version, which every release bumps, so a contract check
+/// ignores it: a release does not make the committed contracts stale.
+fn without_generator_version(cue: &str) -> std::borrow::Cow<'_, str> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r#"(generator:\s*\{[^{}]*?\bversion:\s*)"[^"]*""#).expect("valid regex")
+    })
+    .replace_all(cue, r#"${1}"""#)
+}
+
+/// Compares an exported contract with the file at `path`, ignoring
+/// metadata.generator.version.
 pub(crate) fn check_contract(cue: &str, path: &Path) -> Result<(), String> {
     let shown = path.display();
     let old = match std::fs::read_to_string(path) {
@@ -637,6 +649,10 @@ pub(crate) fn check_contract(cue: &str, path: &Path) -> Result<(), String> {
         }
         Err(e) => return Err(format!("docuconf: cannot read {shown}: {e}")),
     };
+    let (old, cue) = (
+        without_generator_version(&old),
+        without_generator_version(cue),
+    );
     if old == cue {
         return Ok(());
     }
@@ -775,5 +791,21 @@ mod tests {
             e.ends_with("first difference at line 2:\n  - b\n  + B"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn check_contract_ignores_only_the_generator_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.cue");
+        let contract = |sdk: &str, version: &str, port: u16| {
+            format!(
+                "metadata: {{\n\tname: \"svc\"\n\tgenerator: {{\n\t\tlanguage: \"rust\"\n\t\tsdk:      \"{sdk}\"\n\t\tversion:  \"{version}\"\n\t}}\n}}\nPORT: default: {port}\n"
+            )
+        };
+        std::fs::write(&path, contract("docuconf-rs", "0.1.0", 8080)).unwrap();
+        assert!(super::check_contract(&contract("docuconf-rs", "0.2.0", 8080), &path).is_ok());
+        let e = super::check_contract(&contract("docuconf-rs", "0.2.0", 9090), &path).unwrap_err();
+        assert!(e.contains("- PORT: default: 8080"), "{e}");
+        assert!(super::check_contract(&contract("other", "0.1.0", 8080), &path).is_err());
     }
 }
