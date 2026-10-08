@@ -29,8 +29,9 @@ struct Config {
     log_level: LogLevel,
 
     /// Postgres connection string for the orders database.
-    // `Secret` marks it `secret: true`; `schemes` makes it a `url`.
-    #[docuconf(schemes("postgres"))]
+    // `Secret` marks it `secret: true`; `schemes` makes it a `url`, and
+    // `max_length` caps it in characters.
+    #[docuconf(schemes("postgres"), max_length = 2048)]
     database_url: Secret<String>,
 
     /// Browser origins allowed to call the API.

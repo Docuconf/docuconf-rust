@@ -157,5 +157,20 @@ jobs:
           cp examples/orders/contract.cue "$vet/orders/"
           cd "$vet" && "$(go env GOPATH)/bin/cue" vet -c ./orders
 
+      - name: Install the docuconf CLI
+        working-directory: docuconf-go/cmd/docuconf
+        run: go install .
+
+      # CONFIG.md, CONFIG.agents.md and docs.json are generated from the
+      # committed contract.cue (nothing above rewrites it, so a release's
+      # metadata.generator.version bump stays in all four files).
+      - name: Generated docs are up to date
+        working-directory: examples/orders
+        run: |
+          git checkout -- contract.cue
+          docuconf docs contract.cue --check CONFIG.md
+          docuconf docs contract.cue --format agents --check CONFIG.agents.md
+          docuconf docs contract.cue --format model --check docs.json
+
       - name: Smoke test
         run: examples/orders/smoke.sh
