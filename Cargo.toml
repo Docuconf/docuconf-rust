@@ -1,5 +1,5 @@
 [workspace]
-members = ["docuconf", "docuconf-derive", "examples/orders"]
+members = ["docuconf", "docuconf-derive", "examples/orders", "readme"]
 resolver = "2"
 
 [workspace.package]

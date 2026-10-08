@@ -99,10 +99,20 @@ impl fmt::Display for Violation {
 }
 
 /// Every violation found at boot, reported together.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its `Debug` output is the same as its `Display` output, so `?` from
+/// `main` prints the report rather than a struct dump.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ValidationError {
-    /// The violations, in declaration order: variables, then files.
+    /// The violations, sorted by input name: variables first, then file
+    /// inputs, then overlays.
     pub violations: Vec<Violation>,
+}
+
+impl fmt::Debug for ValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
 }
 
 impl ValidationError {
@@ -141,7 +151,9 @@ impl std::error::Error for ValidationError {}
 /// Mistakes in the declaration itself: an invalid variable name, a missing
 /// description, a default that breaks its own constraints, a pattern that is
 /// not RE2. These are programming errors, found before any value is read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Most of them are compile errors already; these are the ones that need
+/// the whole declaration (names, file paths, RE2 patterns).
+#[derive(Clone, PartialEq, Eq)]
 pub struct DeclarationError {
     /// One message per problem, naming the variable and the Rust field.
     pub problems: Vec<String>,
@@ -161,10 +173,20 @@ impl fmt::Display for DeclarationError {
     }
 }
 
+impl fmt::Debug for DeclarationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
 impl std::error::Error for DeclarationError {}
 
 /// What [`load`](crate::load) returns on failure.
-#[derive(Debug)]
+///
+/// `Debug` prints the same report as `Display`, and the error has no
+/// `source()`, so `fn main() -> Result<(), Box<dyn Error>>` and
+/// `anyhow::Result` both print the report once. Prefer
+/// [`load_or_exit`](crate::load_or_exit) in `main`.
 pub enum Error {
     /// The struct's declaration is invalid.
     Declaration(DeclarationError),
@@ -196,14 +218,15 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Declaration(e) => Some(e),
-            Error::Validation(e) => Some(e),
-        }
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
     }
 }
+
+/// The error is the report itself: it has no `source()`, so error
+/// reporters such as `anyhow` print it once, not twice.
+impl std::error::Error for Error {}
 
 impl From<DeclarationError> for Error {
     fn from(e: DeclarationError) -> Self {

@@ -1,5 +1,7 @@
 //! Boot-time loading of variables: parsing, constraints, secrets and the
 //! all-violations-together report.
+// These tests use the TLS and keystore file inputs (default features).
+#![cfg(all(feature = "tls", feature = "keystore"))]
 
 mod common;
 
@@ -378,7 +380,7 @@ fn reports_every_violation_together() {
         "{text}"
     );
     assert!(
-        text.contains("PORT: \"abc\" is not a 64-bit integer (invalid_type)"),
+        text.contains("PORT: \"abc\" is not an integer (invalid_type)"),
         "{text}"
     );
 }
@@ -530,4 +532,137 @@ fn unsigned_numbers_from_json_and_yaml_files_bind() {
         assert_eq!(p.size, 16);
         assert_eq!(p.warm, 1.0);
     }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct RunLimits {
+    max: u64,
+}
+
+#[derive(Debug, Deserialize, Docuconf)]
+#[allow(dead_code)]
+struct Lengths {
+    /// Where to report each run.
+    #[docuconf(schemes = "https", max_length = 24)]
+    callback: Option<String>,
+    /// Database connection string.
+    #[docuconf(max_length = 30)]
+    db_url: Option<docuconf::Secret<docuconf::url::Url>>,
+    /// Run limits as a JSON object.
+    #[docuconf(max_length = 16)]
+    limits: Option<docuconf::Json<serde_json::Value>>,
+    /// Branch codes, two to four characters each.
+    #[docuconf(item_min_length = 2, item_max_length = 4)]
+    branches: Option<Vec<String>>,
+}
+
+fn load_lengths(env: &[(&str, &str)]) -> Result<Lengths, Error> {
+    docuconf::Loader::<Lengths>::new()
+        .env(env.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+        .termination_log(false)
+        .load()
+}
+
+fn length_violations(env: &[(&str, &str)]) -> docuconf::ValidationError {
+    match load_lengths(env) {
+        Err(Error::Validation(v)) => v,
+        Err(e) => panic!("expected violations, got {e}"),
+        Ok(g) => panic!("expected violations, loaded {g:?}"),
+    }
+}
+
+#[test]
+fn url_max_length_counts_characters() {
+    // 24 characters, exactly maxLength.
+    let c = load_lengths(&[("CALLBACK", "https://a.example/runs/4")]).unwrap();
+    assert_eq!(c.callback.as_deref(), Some("https://a.example/runs/4"));
+    // 24 characters but 46 bytes.
+    load_lengths(&[("CALLBACK", "https://例え.jp/日本語の道/一二三四")]).unwrap();
+
+    for raw in [
+        "https://a.example/runs/42",
+        "https://例え.jp/日本語の道/一二三四五",
+    ] {
+        let v = length_violations(&[("CALLBACK", raw)]);
+        assert_eq!(v.codes_for("CALLBACK"), [Code::OutOfRange], "{raw}");
+        assert!(
+            v.to_string()
+                .contains("is 25 characters, above maxLength 24"),
+            "{v}"
+        );
+    }
+
+    // A secret reports its length, never its value.
+    let v = length_violations(&[("DB_URL", "postgres://app:s3cr3t@db:5432/app")]);
+    assert_eq!(v.codes_for("DB_URL"), [Code::OutOfRange]);
+    let text = v.to_string();
+    assert!(
+        text.contains("value is 33 characters, above maxLength 30"),
+        "{text}"
+    );
+    assert!(!text.contains("s3cr3t"), "{text}");
+}
+
+#[test]
+fn json_max_length_measures_the_value_as_received() {
+    load_lengths(&[("LIMITS", r#"{"max":12345678}"#)]).unwrap();
+    // 16 characters, more bytes; an emoji is 1 code point (2 UTF-16 units).
+    load_lengths(&[("LIMITS", r#"{"n":"日本語の道路xy"}"#)]).unwrap();
+    load_lengths(&[("LIMITS", r#"{"n":"😀😀😀😀😀😀😀😀"}"#)]).unwrap();
+
+    let v = length_violations(&[("LIMITS", r#"{"max":123456789}"#)]);
+    assert_eq!(v.codes_for("LIMITS"), [Code::OutOfRange]);
+    assert!(
+        v.to_string()
+            .contains("is 17 characters of JSON, above maxLength 16"),
+        "{v}"
+    );
+    // Whitespace counts: the compact form would fit, the value as received
+    // does not.
+    let v = length_violations(&[("LIMITS", r#"{ "max": 123456 }"#)]);
+    assert_eq!(v.codes_for("LIMITS"), [Code::OutOfRange]);
+}
+
+#[test]
+fn json_max_length_from_a_config_file_measures_compact_json() {
+    use docuconf::figment::providers::{Format, Toml};
+    use docuconf::figment::Figment;
+
+    let load = |toml: &str| {
+        docuconf::Loader::<Lengths>::new()
+            .figment(Figment::from(Toml::string(toml)))
+            .env(Vec::<(String, String)>::new())
+            .termination_log(false)
+            .load()
+    };
+    // {"max":12345678} is 16 characters compact.
+    let c = load("limits = { max = 12345678 }").unwrap();
+    assert_eq!(c.limits.unwrap().0["max"], 12345678);
+    match load("limits = { max = 123456789 }") {
+        Err(Error::Validation(v)) => assert_eq!(v.codes_for("LIMITS"), [Code::OutOfRange]),
+        other => panic!("expected out_of_range, got {other:?}"),
+    }
+}
+
+#[test]
+fn list_item_lengths_count_characters_after_splitting() {
+    let c = load_lengths(&[("BRANCHES", r#"["BE","ZÜ01","GE02"]"#)]).unwrap();
+    assert_eq!(c.branches.unwrap(), ["BE", "ZÜ01", "GE02"]);
+    load_lengths(&[("BRANCHES", r#"["日本語x","😀😀"]"#)]).unwrap();
+
+    let v = length_violations(&[("BRANCHES", r#"["BE","ZÜRICH"]"#)]);
+    assert_eq!(v.codes_for("BRANCHES"), [Code::OutOfRange]);
+    assert!(
+        v.to_string()
+            .contains("has item 1 \"ZÜRICH\" of 6 characters, above itemMaxLength 4"),
+        "{v}"
+    );
+    let v = length_violations(&[("BRANCHES", r#"["BE","B"]"#)]);
+    assert_eq!(v.codes_for("BRANCHES"), [Code::OutOfRange]);
+    assert!(
+        v.to_string()
+            .contains("has item 1 \"B\" of 1 characters, below itemMinLength 2"),
+        "{v}"
+    );
 }

@@ -87,22 +87,34 @@ pub(crate) fn lit_value(kind: &VarKind, l: &Lit) -> Result<Typed, String> {
                 (ItemKind::Int { .. }, Lit::Int(i)) => i64::try_from(*i)
                     .map(Typed::Int)
                     .map_err(|_| format!("{i} is outside the 64-bit integer range")),
-                _ => Err(format!("list item {l:?} does not match the item type")),
+                _ => Err(format!(
+                    "list item {} is not {}",
+                    l.show(),
+                    match item {
+                        ItemKind::String => "a string",
+                        ItemKind::Int { .. } => "an integer",
+                    }
+                )),
             })
             .collect::<Result<Vec<_>, _>>()
             .map(Typed::List),
         (VarKind::Json { .. }, Lit::Str(s)) => serde_json::from_str(s)
             .map(Typed::Json)
             .map_err(|e| format!("is not valid JSON: {e}")),
-        (k, l) => Err(format!(
-            "{l:?} is not a {} value{}",
-            k.type_name(),
-            match k {
-                VarKind::Duration => " (write it as a string such as \"30s\")",
-                VarKind::Json { .. } => " (write it as a JSON string)",
-                _ => "",
-            }
-        )),
+        (k, l) => Err(format!("{} is not {}", l.show(), expected(k))),
+    }
+}
+
+/// What a literal for a variable of `kind` must look like, for messages.
+fn expected(kind: &VarKind) -> &'static str {
+    match kind {
+        VarKind::String | VarKind::Url | VarKind::Enum(_) => "a string",
+        VarKind::Int { .. } => "an integer",
+        VarKind::Float => "a number",
+        VarKind::Bool => "true or false",
+        VarKind::Duration => "a duration (write it as a string such as \"30s\")",
+        VarKind::List(_) => "a list (write it as [\"a\", \"b\"])",
+        VarKind::Json { .. } => "JSON (write it as a string such as r#\"{\"a\":1}\"#)",
     }
 }
 
@@ -158,9 +170,21 @@ pub(crate) fn parse_wire(var: &VarDecl, raw: &str) -> Result<Typed, ParseError> 
             ListEncoding::Csv(sep) => parse_items(*item, raw.split(sep.as_str())),
             ListEncoding::Indexed => parse_items(*item, [raw]),
         },
-        VarKind::Json { .. } => serde_json::from_str(raw)
-            .map(Typed::Json)
-            .map_err(|_| invalid("is not valid JSON")),
+        VarKind::Json { .. } => {
+            let doc = serde_json::from_str(raw).map_err(|_| invalid("is not valid JSON"))?;
+            // maxLength bounds the value as received, whitespace included,
+            // not re-encoded: that is what a fixed-width field has to hold.
+            if let Some(hi) = var.max_length {
+                let n = raw.chars().count() as u64;
+                if n > hi {
+                    return Err((
+                        Code::OutOfRange,
+                        format!("is {n} characters of JSON, above maxLength {hi}"),
+                    ));
+                }
+            }
+            Ok(Typed::Json(doc))
+        }
     }
 }
 
@@ -193,7 +217,7 @@ fn parse_int(raw: &str) -> Result<i64, ParseError> {
                 "is outside the 64-bit integer range".to_string(),
             )
         } else {
-            (Code::InvalidType, "is not a 64-bit integer".to_string())
+            (Code::InvalidType, "is not an integer".to_string())
         }
     })
 }
@@ -226,7 +250,7 @@ fn json_item(item: ItemKind, i: usize, x: &serde_json::Value) -> Result<Typed, P
             } else {
                 (
                     Code::InvalidType,
-                    format!("has item {i} that is not a 64-bit integer"),
+                    format!("has item {i} that is not an integer"),
                 )
             })
         }
@@ -280,8 +304,16 @@ pub(crate) fn from_figment(kind: &VarKind, v: &Value) -> Result<Typed, String> {
 }
 
 /// Checks a typed value against the variable's constraints. Each message
-/// starts with the value (or "value" for a secret).
+/// starts with the value (or "value" for a secret). A `json` value's
+/// `maxLength` is measured on its compact JSON.
 pub(crate) fn check(var: &VarDecl, t: &Typed) -> Vec<(Code, String)> {
+    check_value(var, t, false)
+}
+
+/// As [`check`]. `from_wire` is true for a value parsed from the
+/// environment, whose `json` length [`parse_wire`] already measured as
+/// received.
+pub(crate) fn check_value(var: &VarDecl, t: &Typed, from_wire: bool) -> Vec<(Code, String)> {
     let shown = if var.secret {
         "value".to_string()
     } else {
@@ -361,6 +393,14 @@ pub(crate) fn check(var: &VarDecl, t: &Typed) -> Vec<(Code, String)> {
                         Code::InvalidScheme,
                         format!("has scheme {scheme}, not one of {}", var.schemes.join(", ")),
                     );
+                } else if let Some(hi) = var.max_length {
+                    let n = s.chars().count() as u64;
+                    if n > hi {
+                        push(
+                            Code::OutOfRange,
+                            format!("is {n} characters, above maxLength {hi}"),
+                        );
+                    }
                 }
             }
         },
@@ -406,8 +446,43 @@ pub(crate) fn check(var: &VarDecl, t: &Typed) -> Vec<(Code, String)> {
                     push(Code::OutOfRange, m);
                 }
             }
+            if let ItemKind::String = item {
+                // One violation per variable: the first item out of bounds.
+                let lo = var.item_min_length.unwrap_or(0);
+                let hi = var.item_max_length.unwrap_or(u64::MAX);
+                if let Some((i, s, n)) = items.iter().enumerate().find_map(|(i, x)| match x {
+                    Typed::Str(s) => {
+                        let n = s.chars().count() as u64;
+                        (n < lo || n > hi).then_some((i, s, n))
+                    }
+                    _ => None,
+                }) {
+                    let item = if var.secret {
+                        String::new()
+                    } else {
+                        format!(" {}", Typed::Str(s.clone()).show())
+                    };
+                    let m = if n < lo {
+                        format!("has item {i}{item} of {n} characters, below itemMinLength {lo}")
+                    } else {
+                        format!("has item {i}{item} of {n} characters, above itemMaxLength {hi}")
+                    };
+                    push(Code::OutOfRange, m);
+                }
+            }
         }
         (VarKind::Json { schema, bind }, Typed::Json(j)) => {
+            if let (Some(hi), false) = (var.max_length, from_wire) {
+                // The compact JSON the platform renders: no insignificant
+                // whitespace and no escaping beyond what JSON requires.
+                let n = serde_json::to_string(j).unwrap_or_default().chars().count() as u64;
+                if n > hi {
+                    push(
+                        Code::OutOfRange,
+                        format!("is {n} characters of JSON, above maxLength {hi}"),
+                    );
+                }
+            }
             for msg in crate::schema::validate(schema, j, var.secret) {
                 push(Code::SchemaMismatch, msg);
             }

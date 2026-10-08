@@ -4,6 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      docuconf_go_ref:
+        description: docuconf-go ref to test against (empty = .github/docuconf-go.ref)
+        required: false
+        default: ""
+  # Nightly against docuconf-go main, to catch spec changes before a bump PR.
+  schedule:
+    - cron: "23 5 * * *"
 
 permissions:
   contents: read
@@ -24,10 +33,21 @@ jobs:
       # (conformance/cases.json) live in docuconf-go; the export tests vet
       # generated contracts against the one, and tests/conformance.rs runs
       # the other.
-      - uses: actions/checkout@v4
+      - name: Pick the docuconf-go ref
+        id: dcref
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.docuconf_go_ref }}
+        run: |
+          if [ "$EVENT" = schedule ]; then echo "ref=main" >> "$GITHUB_OUTPUT"
+          elif [ -n "$INPUT_REF" ]; then echo "ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
+          else echo "ref=$(tr -d '[:space:]' < .github/docuconf-go.ref)" >> "$GITHUB_OUTPUT"; fi
+      - name: Check out docuconf-go
+        uses: actions/checkout@v4
         with:
           repository: docuconf/docuconf-go
           path: docuconf-go
+          ref: ${{ steps.dcref.outputs.ref }}
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -42,31 +62,51 @@ jobs:
       - name: Install cue
         run: go install cuelang.org/go/cmd/cue@v0.17.1
 
+      # The docuconf-go-facing subset (conformance suite, cue vet of exported
+      # contracts); docuconf-go's downstream workflow runs the same script.
+      - name: Run scripts/conformance.sh
+        run: scripts/conformance.sh
+        env:
+          DOCUCONF_GO_DIR: ${{ github.workspace }}/docuconf-go
       - name: Format
         if: matrix.rust == 'stable'
         run: cargo fmt --all --check
 
       - name: Clippy
         if: matrix.rust == 'stable'
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo clippy -p docuconf --all-targets --no-default-features --locked -- -D warnings
 
+      # The README crate's doctests compile every Rust block in README.md
+      # (and run the test blocks) with only docuconf and serde as
+      # dependencies.
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-features --locked
         env:
           DOCUCONF_SPEC_CUE: ${{ github.workspace }}/docuconf-go/spec/cue
           DOCUCONF_REQUIRE_VET: "1"
           DOCUCONF_CONFORMANCE: ${{ github.workspace }}/docuconf-go/conformance/cases.json
           DOCUCONF_REQUIRE_CONFORMANCE: "1"
 
+      # An env-only service: no rustls, ring, webpki, x509-parser or PKCS#12.
+      - name: Test without default features
+        run: |
+          cargo test -p docuconf --no-default-features --lib --tests --locked
+          ! cargo tree -p docuconf --no-default-features -e normal --locked | grep -E '^.*(rustls|ring|x509-parser|p12-keystore) v'
+        env:
+          DOCUCONF_CONFORMANCE: ${{ github.workspace }}/docuconf-go/conformance/cases.json
+          DOCUCONF_REQUIRE_CONFORMANCE: "1"
+
       - name: Docs
         if: matrix.rust == 'stable'
-        run: cargo doc --workspace --no-deps --locked
+        run: cargo doc --workspace --no-deps --all-features --locked
         env:
           RUSTDOCFLAGS: -D warnings
 
       - name: Package
         if: matrix.rust == 'stable'
-        run: cargo package --workspace --exclude orders --locked
+        run: cargo package --workspace --exclude orders --exclude docuconf-readme --locked
 
   # examples/orders: builds against the SDK in this repository, keeps its
   # committed contract.cue in step with the code, and boots.
@@ -75,10 +115,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/checkout@v4
+      - name: Pick the docuconf-go ref
+        id: dcref
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.docuconf_go_ref }}
+        run: |
+          if [ "$EVENT" = schedule ]; then echo "ref=main" >> "$GITHUB_OUTPUT"
+          elif [ -n "$INPUT_REF" ]; then echo "ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
+          else echo "ref=$(tr -d '[:space:]' < .github/docuconf-go.ref)" >> "$GITHUB_OUTPUT"; fi
+      - name: Check out docuconf-go
+        uses: actions/checkout@v4
         with:
           repository: docuconf/docuconf-go
           path: docuconf-go
+          ref: ${{ steps.dcref.outputs.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -95,11 +146,8 @@ jobs:
 
       - name: Contract is up to date
         working-directory: examples/orders
-        run: |
-          cargo run --locked --quiet -p orders -- export "$RUNNER_TEMP/contract.cue"
-          # Ignores metadata.generator.version, which release PRs bump.
-          ../../scripts/check-generated.sh --files contract.cue "$RUNNER_TEMP/contract.cue" \
-            || { echo "contract.cue is stale: run 'cargo run -p orders -- export contract.cue' in examples/orders"; exit 1; }
+        # Ignores metadata.generator.version, which release PRs bump.
+        run: cargo run --locked --quiet -p orders -- export --check contract.cue
 
       - name: Vet the contract
         run: |

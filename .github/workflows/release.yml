@@ -21,10 +21,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/checkout@v4
+      - name: Pick the docuconf-go ref
+        id: dcref
+        run: echo "ref=$(tr -d '[:space:]' < .github/docuconf-go.ref)" >> "$GITHUB_OUTPUT"
+      - name: Check out docuconf-go
+        uses: actions/checkout@v4
         with:
           repository: docuconf/docuconf-go
           path: docuconf-go
+          ref: ${{ steps.dcref.outputs.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -47,9 +52,9 @@ jobs:
       - name: Check
         run: |
           cargo fmt --all --check
-          cargo clippy --workspace --all-targets --locked -- -D warnings
-          cargo test --workspace --locked
-          cargo package --workspace --exclude orders --locked
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-features --locked
+          cargo package --workspace --exclude orders --exclude docuconf-readme --locked
         env:
           DOCUCONF_SPEC_CUE: ${{ github.workspace }}/docuconf-go/spec/cue
           DOCUCONF_REQUIRE_VET: "1"

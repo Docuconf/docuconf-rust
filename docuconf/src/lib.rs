@@ -47,14 +47,15 @@
 //! #[serde(rename_all = "lowercase")]
 //! enum LogLevel { Debug, Info, Warn, Error }
 //!
-//! #[derive(Deserialize, schemars::JsonSchema)]
+//! #[derive(Deserialize, docuconf::JsonSchema)]
+//! #[schemars(crate = "docuconf::schemars")]
 //! struct Routes { routes: Vec<String> }
 //!
 //! let cue = docuconf::export::<Config>(&docuconf::Meta::new("billing-api")).unwrap();
 //! assert!(cue.contains("DATABASE_URL: {"));
 //! ```
 //!
-//! At boot, `let config: Config = docuconf::load()?;`.
+//! At boot, `let config: Config = docuconf::load_or_exit();`.
 //! [`Loader`] adds the app's own config files, profiles and a platform
 //! config-file [`Overlay`]. [`Contract`] validates an environment against a
 //! contract given as JSON, with no Rust declaration (contract-first mode).
@@ -68,16 +69,27 @@
 //! | `f32`, `f64` | `float` |
 //! | `bool` | `bool` |
 //! | `std::time::Duration` with `#[serde(with = "docuconf::humantime_serde")]` | `duration`, encoding `go` |
-//! | `url::Url` | `url` |
+//! | `url::Url` | `url` (`max_length`) |
 //! | a `#[derive(DocuconfEnum)]` enum | `enum` |
-//! | `Vec<String>`, `Vec<int>` | `list`, encoding `json`, with an int item type's range as `itemMin`/`itemMax` (narrow it with `item_min`/`item_max`) |
-//! | [`Json<T>`] | `json`, schema from `T: JsonSchema` |
+//! | `Vec<String>`, `Vec<int>` | `list`, encoding `json`, with an int item type's range as `itemMin`/`itemMax` (narrow it with `item_min`/`item_max`); string items take `item_min_length`/`item_max_length` |
+//! | [`Json<T>`] | `json`, schema from `T: JsonSchema` (`max_length` on its wire string) |
 //! | [`Secret<T>`] | `T`, with `secret: true` |
 //! | `Option<T>` | `T`, optional |
-//! | [`ConfigFile<T>`], [`TlsKeyPair`], [`CaBundle`], [`Keystore`], [`TextFile`], [`BinaryFile`] | file inputs |
+//! | [`ConfigFile<T>`], `TlsKeyPair`, `CaBundle`, `Keystore`, [`TextFile`], [`BinaryFile`] | file inputs |
 //! | a nested `#[derive(Docuconf)]` struct | its fields, named `PARENT__CHILD` |
 //!
 //! A field without `Option` and without a `default` is required.
+//!
+//! ## Cargo features
+//!
+//! - `tls` (default): the `TlsKeyPair` and `CaBundle` file inputs, checked
+//!   with rustls, webpki and x509-parser.
+//! - `keystore` (default): the `Keystore` (PKCS#12) file input.
+//! - `secrecy`: `secrecy::SecretString` and `secrecy::SecretBox<T>` fields
+//!   declare secret variables.
+//!
+//! A service that reads only environment variables can use
+//! `default-features = false` and skip the TLS stack.
 //!
 //! ## Names
 //!
@@ -93,15 +105,17 @@
 //! values, because figment's `Env` provider trims values and guesses types
 //! (it reads `8080` as a number even for a `String` field), which the spec
 //! forbids. Lists are JSON arrays (`["a","b"]`, which figment's `Env` also
-//! parses), durations are parsed with `humantime` (which reads Go syntax
-//! such as `1m30s`), and an empty value is unset for every type but
-//! `string`.
+//! parses), durations use Go's syntax (`1m30s`, exactly what Go's
+//! `time.ParseDuration` accepts), and an empty value is unset for every
+//! type but `string`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 extern crate self as docuconf;
 
+#[cfg(doctest)]
+mod compile_errors;
 pub mod contract;
 mod cue;
 mod decl;
@@ -112,6 +126,8 @@ mod export;
 mod files;
 mod load;
 mod overlay;
+#[cfg(feature = "tls")]
+mod pki;
 mod schema;
 mod types;
 mod value;
@@ -124,15 +140,34 @@ pub use docuconf_derive::{Docuconf, DocuconfEnum};
 pub use duration::format_go;
 pub use error::{Code, DeclarationError, Error, ValidationError, Violation};
 pub use export::Meta;
-pub use load::Loader;
+pub use load::{Export, Loader};
 pub use overlay::{Overlay, OverlayFormat, Reload};
-pub use types::{BinaryFile, CaBundle, ConfigFile, Json, Keystore, Secret, TextFile, TlsKeyPair};
+#[cfg(feature = "keystore")]
+pub use types::Keystore;
+pub use types::{BinaryFile, ConfigFile, Json, Secret, TextFile};
+#[cfg(feature = "tls")]
+pub use types::{CaBundle, TlsKeyPair};
 
 /// Re-exported for `#[serde(with = "docuconf::humantime_serde")]` on
-/// `Duration` fields.
+/// `Duration` fields (and `docuconf::humantime_serde::option` on
+/// `Option<Duration>`).
 pub use humantime_serde;
 /// Re-exported so apps and docuconf agree on the version.
 pub use {figment, schemars, url};
+
+/// The `schemars` trait and derive, re-exported so a type in a
+/// [`ConfigFile<T>`] or [`Json<T>`] needs no `schemars` dependency of its
+/// own. The derive generates `schemars::` paths, so point it at this
+/// re-export with `#[schemars(crate = "docuconf::schemars")]`:
+///
+/// ```
+/// #[derive(serde::Deserialize, docuconf::JsonSchema)]
+/// #[schemars(crate = "docuconf::schemars")]
+/// struct Fees {
+///     basis_points: std::collections::BTreeMap<String, u32>,
+/// }
+/// ```
+pub use schemars::JsonSchema;
 
 /// A configuration struct with a docuconf declaration. Derive it with
 /// `#[derive(Docuconf)]`.
@@ -147,9 +182,41 @@ pub trait Docuconf {
 }
 
 /// Loads `C` from the process environment and its declared files, with
-/// default options. See [`Loader`] for config files, profiles and tests.
+/// default options. See [`Loader`] for config files, profiles and tests,
+/// and [`load_or_exit`] for `main`.
 pub fn load<C: Docuconf + serde::de::DeserializeOwned>() -> Result<C, Error> {
     Loader::<C>::new().load()
+}
+
+/// Loads `C` like [`load`]; on failure prints every problem to stderr and
+/// exits with status 1 (no panic, no backtrace):
+///
+/// ```text
+/// docuconf: 2 configuration problems:
+///   DATABASE_URL: is required but not set (missing_required)
+///   PORT: 0 is below min 1 (out_of_range)
+/// ```
+///
+/// The problems are also written to the termination log.
+pub fn load_or_exit<C: Docuconf + serde::de::DeserializeOwned>() -> C {
+    Loader::<C>::new().load_or_exit()
+}
+
+/// When the program was started as `<program> export [--check] [PATH]`,
+/// writes (or, with `--check`, verifies) `C`'s contract and exits;
+/// otherwise returns. See [`Loader::export_command`].
+pub fn export_command<C: Docuconf + serde::de::DeserializeOwned>(meta: &Meta) {
+    Loader::<C>::new().export_command(meta)
+}
+
+/// Panics when the contract file at `path` is stale; rewrites it when
+/// `UPDATE_CONTRACT=1`. For a unit test. See [`Loader::assert_contract`].
+#[track_caller]
+pub fn assert_contract<C: Docuconf + serde::de::DeserializeOwned>(
+    meta: &Meta,
+    path: impl AsRef<std::path::Path>,
+) {
+    Loader::<C>::new().assert_contract(meta, path)
 }
 
 /// Exports `C`'s contract as CUE. See [`Loader::export`] to include the

@@ -181,3 +181,77 @@ fn rejects_a_broken_contract() {
     assert!(Contract::from_json("{").is_err());
     assert!(Contract::from_json(r#"{"kind": "Other"}"#).is_err());
 }
+
+#[test]
+fn length_limits_on_urls_json_and_list_items() {
+    let c = contract(json!({
+        "CALLBACK": {"type": "url", "description": "Callback URL", "schemes": ["https"], "maxLength": 24},
+        "LIMITS": {"type": "json", "description": "Run limits", "maxLength": 16},
+        "BRANCHES": {"type": "list", "description": "Branch codes", "items": "string", "itemMinLength": 2, "itemMaxLength": 4},
+        "CODES": {"type": "list", "description": "Codes as JSON", "items": "string", "encoding": "json", "itemMaxLength": 4},
+        "TOKEN": {"type": "url", "description": "Secret URL", "secret": true, "maxLength": 10},
+    }));
+    let v = c
+        .load_env([
+            ("CALLBACK", "https://例え.jp/日本語の道/一二三四"),
+            ("LIMITS", r#"{"n":"日本語の道路xy"}"#),
+            ("BRANCHES", "BE,ZÜ01,GE02"),
+            ("CODES", r#"["😀😀😀😀"]"#),
+        ])
+        .unwrap();
+    assert_eq!(v.to_json()["BRANCHES"], json!(["BE", "ZÜ01", "GE02"]));
+    assert_eq!(v.to_json()["CODES"], json!(["😀😀😀😀"]));
+
+    let e = c
+        .load_env([
+            ("CALLBACK", "https://a.example/runs/42"),
+            ("LIMITS", r#"{ "max": 123456 }"#),
+            ("BRANCHES", "BE,ZÜRICH"),
+            ("CODES", r#"["BE","GENEVA"]"#),
+            ("TOKEN", "https://user:hunter2@x"),
+        ])
+        .unwrap_err();
+    for var in ["CALLBACK", "LIMITS", "BRANCHES", "CODES", "TOKEN"] {
+        assert_eq!(e.codes_for(var), [Code::OutOfRange], "{var}: {e}");
+    }
+    assert!(!e.to_string().contains("hunter2"), "{e}");
+    // Separators are not counted.
+    assert_eq!(
+        c.load_env([("BRANCHES", "B")])
+            .unwrap_err()
+            .codes_for("BRANCHES"),
+        [Code::OutOfRange]
+    );
+}
+
+#[test]
+fn rejects_item_lengths_on_int_lists_and_bad_length_defaults() {
+    let e = Contract::from_value(&json!({
+        "apiVersion": "docuconf.dev/v1alpha1",
+        "kind": "ConfigContract",
+        "metadata": {"name": "svc"},
+        "vars": {
+            "PORTS": {"type": "list", "description": "Ports", "items": "int", "itemMaxLength": 5},
+            "CODES": {"type": "list", "description": "Codes", "items": "string", "itemMinLength": 5, "itemMaxLength": 4},
+            "SITE": {"type": "url", "description": "Site", "maxLength": 10, "default": "https://example.com"},
+            "LIMITS": {"type": "json", "description": "Limits", "maxLength": 9, "default": {"a": "<&>"}},
+            "BRANCHES": {"type": "list", "description": "Branches", "items": "string", "itemMaxLength": 4, "default": ["ZÜRICH"]},
+        },
+    }))
+    .unwrap_err();
+    let all = e.problems.join("\n");
+    for want in [
+        "PORTS: itemMinLength and itemMaxLength only apply to a list of strings",
+        "CODES: itemMinLength 5 is above itemMaxLength 4",
+        "SITE: default \"https://example.com\" is 19 characters, above maxLength 10",
+        // {"a":"<&>"} is 11 characters: no HTML escaping.
+        "LIMITS: default {\"a\":\"<&>\"} is 11 characters of JSON, above maxLength 9",
+        "BRANCHES: default [\"ZÜRICH\"] has item 0 \"ZÜRICH\" of 6 characters, above itemMaxLength 4",
+    ] {
+        assert!(all.contains(want), "missing {want:?} in\n{all}");
+    }
+    // At the limit, without HTML escaping, the default is fine.
+    contract(
+        json!({"LIMITS": {"type": "json", "description": "Limits", "maxLength": 11, "default": {"a": "<&>"}}}),
+    );
+}
