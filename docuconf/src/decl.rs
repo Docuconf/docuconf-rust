@@ -138,6 +138,8 @@ pub(crate) struct VarDecl {
     pub field: String,
     pub kind: VarKind,
     pub description: String,
+    /// CommonMark for generated docs only (SPEC §4.2); never read at runtime.
+    pub details: Option<String>,
     pub required: bool,
     pub secret: bool,
     pub default: Option<Typed>,
@@ -185,6 +187,8 @@ pub(crate) struct FileDecl {
     pub field: String,
     pub kind: FileKind,
     pub description: String,
+    /// CommonMark for generated docs only (SPEC §4.2); never read at runtime.
+    pub details: Option<String>,
     pub required: bool,
     pub secret: bool,
     pub path: String,
@@ -284,6 +288,7 @@ pub(crate) const RESERVED_DIRS: &[&str] = &[
 const COMMON_ATTRS: &[&str] = &[
     "description",
     "desc",
+    "details",
     "env",
     "required",
     "secret",
@@ -298,6 +303,7 @@ const COMMON_ATTRS: &[&str] = &[
 const FILE_COMMON_ATTRS: &[&str] = &[
     "description",
     "desc",
+    "details",
     "name",
     "required",
     "secret",
@@ -309,6 +315,23 @@ const FILE_COMMON_ATTRS: &[&str] = &[
     "reload",
     "max_size",
 ];
+
+/// The most characters (Unicode code points) an input's `details` may have
+/// (SPEC §4.2).
+pub(crate) const MAX_DETAILS: usize = 4000;
+
+/// Checks an input's `details` (SPEC §4.2): docs only, but not blank and at
+/// most [`MAX_DETAILS`] characters.
+pub(crate) fn check_details(details: Option<&str>) -> Option<String> {
+    let d = details?;
+    if d.trim().is_empty() {
+        return Some("details must not be blank".into());
+    }
+    let n = d.chars().count();
+    (n > MAX_DETAILS).then(|| {
+        format!("details are {n} characters (the doc comment after its first paragraph, or the details attribute); details may have at most {MAX_DETAILS}")
+    })
+}
 
 pub(crate) fn is_env_name(s: &str) -> bool {
     let mut c = s.chars();
@@ -498,6 +521,7 @@ impl DeclCx {
                 format!("description {description:?} is shorter than 5 characters")
             });
         }
+        problems.extend(check_details(a.details));
         if let VarKind::Enum(values) = &kind {
             if values.is_empty() {
                 problems.push("an enum needs at least one value".into());
@@ -647,6 +671,7 @@ impl DeclCx {
             field: a.field.to_string(),
             kind,
             description,
+            details: a.details.map(str::to_string),
             required,
             secret,
             default: None,
@@ -732,6 +757,7 @@ impl DeclCx {
                 format!("description {description:?} is shorter than 5 characters")
             });
         }
+        problems.extend(check_details(a.details));
         let path = a.path.unwrap_or("").to_string();
         if path.is_empty() {
             problems.push("needs #[docuconf(path = \"/absolute/path\")]".into());
@@ -851,6 +877,7 @@ impl DeclCx {
             field: a.field.to_string(),
             kind,
             description,
+            details: a.details.map(str::to_string),
             required: a.required || !optional,
             secret,
             path,

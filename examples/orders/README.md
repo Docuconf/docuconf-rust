@@ -9,7 +9,10 @@ declared with docuconf. It shows the three things the Rust SDK gives an app:
 - one check at boot, `docuconf::load_or_exit()`, that reports every problem
   at once with stable codes and exits 1;
 - a CUE contract exported from the struct, for the platform to validate
-  before it deploys ([`contract.cue`](contract.cue)).
+  before it deploys ([`contract.cue`](contract.cue)). Each `///` comment's
+  first paragraph is a variable's `description` and the rest its `details`
+  (see `WORKER_COUNT`); `docuconf docs contract.cue` turns them into
+  CONFIG.md and CONFIG.agents.md.
 
 | Variable | Type | Rules |
 |---|---|---|

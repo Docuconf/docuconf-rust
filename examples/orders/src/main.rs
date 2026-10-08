@@ -15,8 +15,9 @@ use std::time::Duration;
 use docuconf::{Docuconf, DocuconfEnum, Meta, Secret};
 use serde::{Deserialize, Serialize};
 
-/// The service's configuration. Each `///` comment is the variable's
-/// description in the contract, and the Rust type picks its contract type.
+/// The service's configuration. The first paragraph of each `///` comment
+/// is the variable's description in the contract and the rest its details,
+/// and the Rust type picks its contract type.
 #[derive(Debug, Deserialize, Docuconf)]
 struct Config {
     /// HTTP listen port.
@@ -42,6 +43,15 @@ struct Config {
     request_timeout: Duration,
 
     /// Threads serving requests.
+    ///
+    /// Each worker answers one connection at a time, so this is also the
+    /// number of requests served at once. Raise it when requests queue up;
+    /// each worker holds a [`std::thread`] stack.
+    ///
+    /// Keep it at or below the database pool size:
+    ///
+    /// - one connection per worker;
+    /// - plus one for migrations.
     #[docuconf(default = 4, min = 1, max = 64)]
     worker_count: u8,
 }

@@ -255,3 +255,32 @@ fn rejects_item_lengths_on_int_lists_and_bad_length_defaults() {
         json!({"LIMITS": {"type": "json", "description": "Limits", "maxLength": 11, "default": {"a": "<&>"}}}),
     );
 }
+
+#[test]
+fn details_load_and_are_checked() {
+    // Docs only: a contract with details loads, and they change nothing.
+    let c = contract(json!({
+        "PORT": {"type": "int", "description": "HTTP listen port", "details": "Behind the mesh, keep the **default**.\n\n- one\n- two", "default": 8080},
+        "LIMIT": {"type": "int", "description": "Exactly at the limit", "details": "日本".repeat(2000)},
+    }));
+    let v = c.load_env([("LIMIT", "1")]).unwrap();
+    assert_eq!(v.get("PORT").and_then(Value::as_int), Some(8080));
+
+    for (details, want) in [
+        (json!(" \n\t"), "PORT: details must not be blank"),
+        (
+            json!("日本".repeat(2000) + "日"),
+            "PORT: details are 4001 characters",
+        ),
+        (json!(42), "PORT: details must be a string"),
+    ] {
+        let e = Contract::from_value(&json!({
+            "apiVersion": "docuconf.dev/v1alpha1",
+            "kind": "ConfigContract",
+            "metadata": {"name": "svc"},
+            "vars": {"PORT": {"type": "int", "description": "HTTP listen port", "details": details}},
+        }))
+        .unwrap_err();
+        assert!(e.to_string().contains(want), "{e}");
+    }
+}

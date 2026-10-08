@@ -49,6 +49,22 @@ pub struct Gateway {
     pub port: u16,
 
     /// Upstream request timeout.
+    ///
+    /// The gateway gives up on an upstream after this long and answers 504.
+    /// Raise it for slow batch endpoints; keep it below the load balancer's
+    /// idle timeout.
+    ///
+    /// # Choosing a value
+    ///
+    /// Measure the upstream's p99 latency first, with [`Duration`] units:
+    ///
+    /// - p99 latency
+    /// - retries, see [`crate::Gateway`]
+    ///
+    /// ```
+    /// # use std::time::Duration;
+    /// let t = Duration::from_secs(30);
+    /// ```
     #[docuconf(default = "30s", min = "1s", max = "5m")]
     #[serde(with = "docuconf::humantime_serde")]
     pub request_timeout: Duration,
@@ -94,6 +110,7 @@ pub struct Gateway {
 
     /// Routing table: path prefixes and their upstreams.
     #[docuconf(
+        details = "Each route maps a path prefix to an upstream URL.\n\nThe longest prefix wins.",
         path = "/etc/gateway/routes/routes.yaml",
         path_env = "ROUTES_FILE",
         max_size = "64Ki"

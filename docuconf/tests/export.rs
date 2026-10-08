@@ -502,3 +502,49 @@ fn length_limit_declaration_errors() {
         assert!(all.contains(want), "missing {want:?} in\n{all}");
     }
 }
+
+#[test]
+fn details_come_from_the_doc_comment() {
+    let out = docuconf::export::<Gateway>(&Meta::new("gateway")).unwrap();
+    // The first paragraph is the description; the rest is details, with
+    // rustdoc's intra-doc links as code spans and doctest-only lines gone.
+    assert!(out.contains(
+        "description: \"Upstream request timeout\"\n\t\t\tdetails:     \"The gateway gives up on an upstream after this long and answers 504.\\n"
+    ), "{out}");
+    assert!(out.contains("with `Duration` units:\\n\\n- p99 latency\\n- retries, see `crate::Gateway`\\n\\n```rust\\nlet t = Duration::from_secs(30);\\n```\""), "{out}");
+    // A one-paragraph comment has no details.
+    assert!(!out.contains("description: \"HTTP listen port\"\n\t\t\tdetails:"));
+    // The details attribute, on a file input.
+    assert!(out.contains("details:     \"Each route maps a path prefix to an upstream URL.\\n\\nThe longest prefix wins.\""));
+}
+
+#[test]
+fn details_attribute_overrides_the_doc_comment() {
+    #[derive(Debug, Deserialize, Docuconf)]
+    #[allow(dead_code)]
+    struct Svc {
+        /// Worker count.
+        ///
+        /// Not exported: the attribute wins.
+        #[docuconf(default = 4, details = "Keep it below the pool size.")]
+        workers: u32,
+        /// Worker queue size.
+        #[docuconf(description = "Queue length per worker")]
+        queue: Option<u32>,
+    }
+    let out = docuconf::export::<Svc>(&Meta::new("svc")).unwrap();
+    assert!(
+        out.contains(
+            "description: \"Worker count\"\n\t\t\tdetails:     \"Keep it below the pool size.\""
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("Not exported"), "{out}");
+    assert!(
+        out.contains("description: \"Queue length per worker\"\n"),
+        "{out}"
+    );
+    if let Some(res) = cue_vet(&out) {
+        res.unwrap_or_else(|e| panic!("cue vet failed:\n{e}\n{out}"));
+    }
+}

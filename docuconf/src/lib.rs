@@ -80,6 +80,17 @@
 //!
 //! A field without `Option` and without a `default` is required.
 //!
+//! ## Descriptions and details
+//!
+//! The first paragraph of a field's `///` comment is its `description`,
+//! and the rest its `details`: CommonMark for generated docs, never read at
+//! runtime. Intra-doc links become code spans, and doctest attributes and
+//! hidden `# ` lines are dropped from code blocks. `#[docuconf(description
+//! = "...")]` and `#[docuconf(details = "...")]` override the comment.
+//! Details must not be blank and have at most 4000 characters. The
+//! `docuconf docs` command of the docuconf CLI renders them, with the rest
+//! of the contract, as CONFIG.md and CONFIG.agents.md.
+//!
 //! ## Cargo features
 //!
 //! - `tls` (default): the `TlsKeyPair` and `CaBundle` file inputs, checked

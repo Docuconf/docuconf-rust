@@ -86,10 +86,53 @@ fn main() {
 }
 ```
 
-The `///` doc comment is the variable's description (required, at least 5 characters). A field that is not an
-`Option` and has no `default` is required. The Rust type picks the contract type, and the variable name is the
-field name in upper case: `PORT`, `DATABASE_URL`. `Secret<T>` marks a variable secret: its `Debug` and
-`Serialize` output is `***`, and docuconf never prints its value.
+The `///` doc comment documents the input. Its first paragraph is the `description` (required, at least 5
+characters, joined onto one line; a trailing period is dropped), and the rest of the comment is the `details`:
+CommonMark used only in generated docs, never at runtime, at most 4000 characters:
+
+```rust
+use std::time::Duration;
+
+#[derive(serde::Deserialize, docuconf::Docuconf)]
+pub struct Config {
+    /// Upstream request timeout.
+    ///
+    /// The gateway gives up after this long and answers 504. Keep it below the
+    /// load balancer's idle timeout; see [`Duration`].
+    ///
+    /// ```
+    /// # use std::time::Duration;
+    /// let t = Duration::from_secs(30);
+    /// ```
+    #[docuconf(default = "30s", min = "1s", max = "5m")]
+    #[serde(with = "docuconf::humantime_serde")]
+    pub request_timeout: Duration,
+}
+```
+
+exports
+
+```cue
+REQUEST_TIMEOUT: {
+	type:        "duration"
+	description: "Upstream request timeout"
+	details:     "The gateway gives up after this long and answers 504. Keep it below the\nload balancer's idle timeout; see `Duration`.\n\n```rust\nlet t = Duration::from_secs(30);\n```"
+	...
+```
+
+Rustdoc syntax becomes CommonMark: intra-doc links (`` [`Duration`] ``, `[crate::Loader]`, `[text](crate::Meta)`)
+become code spans or their text, and code blocks lose doctest attributes (`ignore`, `no_run`, ...) and hidden `# `
+lines. A comment that starts with a list, a heading or a code block is all description. `#[docuconf(description =
+"...")]` and `#[docuconf(details = "...")]` override the comment. Declaration and export fail when an input has no
+description, or details that are blank or over 4000 characters (Unicode code points). A contract-first
+[`Contract`](https://docs.rs/docuconf/latest/docuconf/contract/) accepts and ignores `details`.
+
+`docuconf docs` (in the [docuconf CLI](https://github.com/docuconf/docuconf-go)) generates CONFIG.md and
+CONFIG.agents.md from the exported contract; the SDK only exports the text.
+
+A field that is not an `Option` and has no `default` is required. The Rust type picks the contract type, and the
+variable name is the field name in upper case: `PORT`, `DATABASE_URL`. `Secret<T>` marks a variable secret: its
+`Debug` and `Serialize` output is `***`, and docuconf never prints its value.
 
 The derive catches declaration mistakes **at compile time**: a missing description, a default of the wrong type
 or outside its bounds, a secret or `required` variable with a default, a `Duration` without
@@ -304,9 +347,9 @@ type``. Use `Json<HashMap<..>>` for a map, or `#[docuconf(skip)]` to load the fi
 Variable attributes: `default`, `required`, `secret`, `min`, `max`, `min_length`, `max_length`, `pattern` (RE2,
 matches anywhere: anchor with `^`/`$`), `values`, `schemes`, `min_items`, `max_items`, `item_min`, `item_max`,
 `item_min_length`, `item_max_length`, `group`, `examples`, `deprecated`, `replaced_by`, `config_key`, `env`,
-`description`, `skip`. File attributes: `path` (required), `name` (input name; default is the field name with
+`description`, `details`, `skip`. File attributes: `path` (required), `name` (input name; default is the field name with
 `-`), `path_env`, `reload` (only `"restart"`; `"watch"` is not implemented yet and is rejected), `max_size`
-(`65536` or `"64Ki"`), `required`, `secret`, `group`, `deprecated`, plus the type-specific ones above. The struct
+(`65536` or `"64Ki"`), `required`, `secret`, `description`, `details`, `group`, `deprecated`, plus the type-specific ones above. The struct
 takes `prefix`.
 
 `item_min` and `item_max` bound each item of an int list, and an item outside them is `out_of_range` at boot.

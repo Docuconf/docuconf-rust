@@ -34,6 +34,18 @@
 //! }
 //! ```
 //!
+//! Blank details (`details must not be blank`); details over 4000
+//! characters fail the same way:
+//!
+//! ```compile_fail,E0080
+//! #[derive(serde::Deserialize, docuconf::Docuconf)]
+//! struct Config {
+//!     /// HTTP listen port.
+//!     #[docuconf(default = 8080, details = " ")]
+//!     port: u16,
+//! }
+//! ```
+//!
 //! A default of the wrong kind (`default "abc" is not an integer`):
 //!
 //! ```compile_fail,E0080

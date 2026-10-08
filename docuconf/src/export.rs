@@ -206,6 +206,9 @@ fn var_node(v: &VarDecl, file_default: Option<&Typed>, config_key: Option<&Strin
     let mut add = |k: &str, n: Node| f.push((k.to_string(), n));
     add("type", Node::Str(v.kind.type_name().into()));
     add("description", Node::Str(v.description.clone()));
+    if let Some(d) = &v.details {
+        add("details", Node::Str(d.clone()));
+    }
     // A value in an always-loaded config file makes the variable optional
     // with that default (SPEC §4.4).
     let default = file_default.or(v.default.as_ref());
@@ -321,6 +324,9 @@ fn file_node(d: &FileDecl) -> Node {
         add("format", Node::Str(fmt.clone()));
     }
     add("description", Node::Str(d.description.clone()));
+    if let Some(details) = &d.details {
+        add("details", Node::Str(details.clone()));
+    }
     if d.required {
         add("required", Node::Bool(true));
     }

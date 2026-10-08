@@ -5,6 +5,8 @@
 //! struct, and `#[derive(serde::Deserialize, docuconf::DocuconfEnum)]` on a
 //! unit-only enum used as an `enum` variable.
 
+mod doc;
+
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{quote, quote_spanned};
@@ -191,6 +193,7 @@ fn split_words(name: &str) -> Vec<String> {
 struct DocAttrs {
     set: Vec<String>,
     description: Option<String>,
+    details: Option<String>,
     env: Option<String>,
     name: Option<String>,
     required: bool,
@@ -375,6 +378,7 @@ fn parse_doc_attrs(attrs: &[Attribute]) -> syn::Result<DocAttrs> {
             };
             match key.as_str() {
                 "description" | "desc" => a.description = Some(s(&meta)?),
+                "details" => a.details = Some(s(&meta)?),
                 "env" => a.env = Some(s(&meta)?),
                 "name" => a.name = Some(s(&meta)?),
                 "required" => a.required = true,
@@ -423,30 +427,18 @@ fn parse_doc_attrs(attrs: &[Attribute]) -> syn::Result<DocAttrs> {
     Ok(a)
 }
 
-/// Joins `///` doc comment lines into one description, dropping a single
-/// trailing period so "HTTP listen port." becomes "HTTP listen port".
-fn doc_comment(attrs: &[Attribute]) -> String {
-    let mut lines = Vec::new();
-    for attr in attrs.iter().filter(|a| a.path().is_ident("doc")) {
-        if let syn::Meta::NameValue(nv) = &attr.meta {
-            if let Expr::Lit(ExprLit {
-                lit: Lit::Str(s), ..
-            }) = &nv.value
-            {
-                for line in s.value().lines() {
-                    let t = line.trim();
-                    if !t.is_empty() {
-                        lines.push(t.to_string());
-                    }
-                }
-            }
-        }
-    }
-    let mut s = lines.join(" ");
-    if s.ends_with('.') && !s.ends_with("..") {
-        s.pop();
-    }
-    s
+/// The description and details from a field's `///` doc comment and its
+/// `description` and `details` attributes: an attribute wins over the
+/// comment, and the comment's first paragraph is the description and the
+/// rest the details (see the `doc` module).
+fn describe(a: &DocAttrs, attrs: &[Attribute]) -> (String, Option<String>) {
+    let (desc, details) = doc::split_doc(&doc::doc_lines(attrs));
+    let description = a.description.clone().unwrap_or(desc);
+    let details = a
+        .details
+        .clone()
+        .or_else(|| (!details.is_empty()).then_some(details));
+    (description, details)
 }
 
 fn opt_str(v: &Option<String>) -> TokenStream2 {
@@ -495,6 +487,7 @@ fn field_checks(
     a: &DocAttrs,
     sf: &SerdeField,
     description: &str,
+    details: Option<&str>,
     errors: &mut Vec<Error>,
 ) -> TokenStream2 {
     let mut err = |span: Span, msg: String| {
@@ -585,6 +578,24 @@ fn field_checks(
         };
         let p = panic_msg(msg);
         conds.push(quote!(if !::core::matches!(<T as I>::SHAPE, S::Group) { #p }));
+    }
+    // Details (SPEC §4.2): docs only, but not blank and at most 4000
+    // characters, as the meta-schema's #Details says.
+    if let Some(d) = details {
+        let n = d.chars().count();
+        let msg = if d.trim().is_empty() {
+            Some(format!(
+                "docuconf: {field}: details must not be blank; write them or remove `details`"
+            ))
+        } else if n > 4000 {
+            Some(format!("docuconf: {field}: details are {n} characters (the doc comment after its first paragraph, or the details attribute); details may have at most 4000"))
+        } else {
+            None
+        };
+        if let Some(msg) = msg {
+            let p = panic_msg(msg);
+            conds.push(quote!(if !::core::matches!(<T as I>::SHAPE, S::Group) { #p }));
+        }
     }
     if let Some((d, _)) = &a.default {
         let show = d.show();
@@ -731,10 +742,8 @@ fn expand_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
             Some(r) => r.clone(),
             None => rename(&rust_name, container.rename_all.as_deref(), f.span())?,
         };
-        let description = a
-            .description
-            .clone()
-            .unwrap_or_else(|| doc_comment(&f.attrs));
+        let (description, doc_details) = describe(&a, &f.attrs);
+        let details = opt_str(&doc_details);
         let ty = &f.ty;
         let set = &a.set;
         let required = a.required;
@@ -783,6 +792,7 @@ fn expand_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
             &a,
             &sf,
             &description,
+            doc_details.as_deref(),
             &mut errors,
         ));
         decls.push(quote_spanned! {span=>
@@ -791,6 +801,7 @@ fn expand_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     field: #field_path,
                     key: #key,
                     description: #description,
+                    details: #details,
                     set: &[#(#set),*],
                     env: #env,
                     name: #name,
@@ -989,6 +1000,30 @@ mod tests {
             assert!(out.contains(want), "missing {want:?} in\n{out}");
         }
         assert!(!out.contains("compile_error"), "{out}");
+    }
+
+    #[test]
+    fn details_mistakes_become_const_checks() {
+        let long = format!("Too much to say.\n\n{}", "日本".repeat(2000) + "日");
+        let out = checks(syn::parse_quote! {
+            struct Config {
+                /// Blank details.
+                #[docuconf(details = " \n\t")]
+                blank: String,
+                #[doc = #long]
+                too_long: String,
+                /// Just enough to say.
+                #[docuconf(details = "Fine.")]
+                fine: String,
+            }
+        });
+        for want in [
+            "docuconf: Config.blank: details must not be blank",
+            "docuconf: Config.too_long: details are 4001 characters (the doc comment after its first paragraph, or the details attribute); details may have at most 4000",
+        ] {
+            assert!(out.contains(want), "missing {want:?} in\n{out}");
+        }
+        assert!(!out.contains("Config.fine: details"), "{out}");
     }
 
     #[test]

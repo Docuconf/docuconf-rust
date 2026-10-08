@@ -39,6 +39,9 @@ pub struct FieldAttrs {
     pub key: &'static str,
     /// The `///` doc comment or `description` attribute.
     pub description: &'static str,
+    /// The rest of the doc comment, as CommonMark, or the `details`
+    /// attribute.
+    pub details: Option<&'static str>,
     /// Names of the docuconf attributes written on the field.
     pub set: &'static [&'static str],
     pub env: Option<&'static str>,
