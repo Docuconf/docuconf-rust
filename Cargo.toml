@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
 repository = "https://github.com/docuconf/docuconf-rust"
-homepage = "https://docuconf.dev"
+homepage = "https://docuconf.dev/languages/rust/"
 authors = ["docuconf contributors"]
 license = "MIT"
 
