@@ -1,5 +1,7 @@
 # docuconf for Rust
 
+Documentation: [docuconf.dev](https://docuconf.dev) · [Rust guide](https://docuconf.dev/languages/rust/)
+
 Typed configuration contracts for [figment](https://docs.rs/figment) and serde. Keep your
 `#[derive(Deserialize)]` config struct, add `#[derive(Docuconf)]`, and the struct becomes a contract that your
 Kubernetes platform checks **before deploy** and your service checks again **at boot**. It covers environment

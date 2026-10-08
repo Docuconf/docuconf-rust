@@ -18,7 +18,7 @@ declared with docuconf. It shows the three things the Rust SDK gives an app:
 |---|---|---|
 | `PORT` | int | 1–65535, default `8080` |
 | `LOG_LEVEL` | enum | `debug`, `info`, `warn`, `error`; default `info` |
-| `DATABASE_URL` | url | secret, required, scheme `postgres` |
+| `DATABASE_URL` | url | secret, required, scheme `postgres`, at most 2048 characters |
 | `ALLOWED_ORIGINS` | list of strings, a JSON array | at least 1 item; default `["http://localhost:3000"]` |
 | `REQUEST_TIMEOUT` | duration, Go syntax | `1s`–`5m`, default `30s` |
 | `WORKER_COUNT` | int | 1–64, default `4` |
@@ -69,6 +69,20 @@ $ cargo run -q -p orders -- export contract.cue
 docuconf: wrote contract.cue
 $ cargo run -q -p orders -- export --check contract.cue
 docuconf: contract.cue is up to date
+```
+
+## Generated docs
+
+[`CONFIG.md`](CONFIG.md), the reference for developers, and
+[`CONFIG.agents.md`](CONFIG.agents.md), the rules and facts AI agents need,
+are generated from `contract.cue` by the `docuconf` CLI, through the docs
+model in [`docs.json`](docs.json). Never edit them by hand; regenerate them
+after exporting the contract (CI fails if they are out of date):
+
+```console
+$ docuconf docs contract.cue -o CONFIG.md
+$ docuconf docs contract.cue --format agents -o CONFIG.agents.md
+$ docuconf docs contract.cue --format model -o docs.json
 ```
 
 ## Deploy
