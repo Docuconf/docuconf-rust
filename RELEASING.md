@@ -50,6 +50,46 @@ release by hand: `gh workflow run release.yml --ref vX.Y.Z`.
 If the second publish fails after the first succeeded, re-run the job: `cargo publish` of an already published
 version fails, so the workflow skips a crate whose version is already on crates.io.
 
+## GitHub Packages and Releases
+
+GitHub Packages has no Cargo registry, so the GitHub copy of each release is the GitHub Release. The `github` job in
+`.github/workflows/release.yml` runs on the same `v*` tags, repeats the tag check and the checks (`fmt`, `clippy`,
+tests, `cargo package`), creates the GitHub Release for the tag if it does not exist, and attaches
+`docuconf-derive-<version>.crate` and `docuconf-<version>.crate`, the exact files crates.io would get.
+
+It does not depend on the crates.io `publish` job, so it works before the crates exist on crates.io and before
+trusted publishing is set up. It uses only the workflow's own `GITHUB_TOKEN` (`contents: write`); there are no secrets
+or accounts to set up, and nothing to configure beyond the `Docuconf` organization allowing `GITHUB_TOKEN` write
+access (it does unless restricted under Organization settings > Actions).
+
+### Installing from GitHub
+
+No token is needed for a public repository. Cargo installs from git, so the simplest way to use a release without
+crates.io is the tag:
+
+```toml
+[dependencies]
+docuconf = { git = "https://github.com/Docuconf/docuconf-rust", tag = "v0.1.0" }
+```
+
+A `.crate` file is a gzipped tarball of the crate's sources. To use the released files, unpack both and depend on
+`docuconf` by path (its `docuconf-derive` dependency then needs a `[patch.crates-io]` entry pointing at the unpacked
+`docuconf-derive`):
+
+```sh
+mkdir -p vendor
+curl -sSL https://github.com/Docuconf/docuconf-rust/releases/download/v0.1.0/docuconf-0.1.0.crate | tar -xz -C vendor
+curl -sSL https://github.com/Docuconf/docuconf-rust/releases/download/v0.1.0/docuconf-derive-0.1.0.crate | tar -xz -C vendor
+```
+
+```toml
+[dependencies]
+docuconf = { path = "vendor/docuconf-0.1.0" }
+
+[patch.crates-io]
+docuconf-derive = { path = "vendor/docuconf-derive-0.1.0" }
+```
+
 ## docuconf-go version
 
 docuconf-go owns the spec, the CUE meta-schema (`spec/cue`), the conformance suite (`conformance/cases.json`) and the
