@@ -22,6 +22,7 @@ declared with docuconf. It shows the three things the Rust SDK gives an app:
 | `ALLOWED_ORIGINS` | list of strings, a JSON array | at least 1 item; default `["http://localhost:3000"]` |
 | `REQUEST_TIMEOUT` | duration, Go syntax | `1s`–`5m`, default `30s` |
 | `WORKER_COUNT` | int | 1–64, default `4` |
+| `WEBHOOK_KEYS` | list of strings, comma-separated | secret, optional; 1–2 keys of 32–256 characters each |
 
 The example is a member of this repository's Cargo workspace and depends on
 the SDK by path, so it always builds against the code next to it.
@@ -35,10 +36,11 @@ orders listening on :8080 with 4 workers, database localhost, log level Info
 $ curl localhost:8080/healthz
 ok
 $ curl localhost:8080/config
-{"ALLOWED_ORIGINS":["http://localhost:3000"],"DATABASE_URL":"***","LOG_LEVEL":"info","PORT":8080,"REQUEST_TIMEOUT":"30s","WORKER_COUNT":4}
+{"ALLOWED_ORIGINS":["http://localhost:3000"],"DATABASE_URL":"***","LOG_LEVEL":"info","PORT":8080,"REQUEST_TIMEOUT":"30s","WEBHOOK_KEYS":null,"WORKER_COUNT":4}
 ```
 
-`/config` shows the typed values; the secret is always `***`.
+`/config` shows the typed values; a secret that is set is always `***`
+(`WEBHOOK_KEYS` is `null` here because it is not set).
 
 ## When the configuration is wrong
 
@@ -54,7 +56,45 @@ $ echo $?
 1
 ```
 
-[`smoke.sh`](smoke.sh) checks both runs; CI runs it on every push.
+[`smoke.sh`](smoke.sh) checks both runs, and the webhook key set below; CI
+runs it on every push.
+
+## Rotate a key
+
+`WEBHOOK_KEYS` is a key set: `POST /webhooks/payments` accepts a body
+whose `X-Signature` header is the hex HMAC-SHA256 of the body under any
+key in the list ([`src/webhook.rs`](src/webhook.rs)). A variable is read
+once, at start, so a new key reaches the service only when the pods
+restart; with two keys valid at once, no webhook is turned away while
+that happens:
+
+1. Add the new key as the second item (`old,new` in the Secret), and roll out.
+2. Switch the sender to the new key.
+3. Remove the old key (`new`), and roll out.
+
+The contract allows 1 or 2 keys of 32 to 256 characters each, so a
+trailing comma or a truncated key stops the service at boot instead of
+locking out the sender:
+
+```console
+$ DATABASE_URL=postgres://orders:pw@localhost:5432/orders \
+    WEBHOOK_KEYS=old-webhook-key-0123456789abcdef0123, cargo run -q -p orders
+docuconf: 1 configuration problem:
+  WEBHOOK_KEYS: value has item 1 of 0 characters, below itemMinLength 32 (out_of_range)
+```
+
+The field is an `Option<Secret<Vec<String>>>` with `encoding = "csv"`, so
+the Secret holds `old,new` and no key ever prints. The tests in
+[`src/main.rs`](src/main.rs) walk through a rotation, and
+[`smoke.sh`](smoke.sh) posts webhooks signed with both keys.
+[SPEC section 6.1](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md#61-rotation)
+covers rotation in general. In a values file, the key set is a
+`secretKeyRef`:
+
+```yaml
+WEBHOOK_KEYS: # a key set: one Secret key holding "old,new" while rotating
+  secretKeyRef: {name: orders-webhooks, key: keys}
+```
 
 ## Export the contract
 

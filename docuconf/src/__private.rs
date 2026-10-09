@@ -63,6 +63,10 @@ pub struct FieldAttrs {
     pub item_max: Option<Lit>,
     pub item_min_length: Option<u64>,
     pub item_max_length: Option<u64>,
+    /// A list's wire encoding: `json` (the default) or `csv`.
+    pub encoding: Option<&'static str>,
+    /// The separator of a `csv` list; `,` by default.
+    pub separator: Option<&'static str>,
     pub group: Option<&'static str>,
     pub examples: &'static [&'static str],
     pub deprecated: Option<&'static str>,
