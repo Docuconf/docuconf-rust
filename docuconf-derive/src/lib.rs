@@ -679,6 +679,19 @@ fn field_checks(
             });
         }
     }
+    match a.reload.as_deref() {
+        Some("watch") => {
+            let p = panic_msg(format!("docuconf: {field}: reload = \"watch\" needs the field type docuconf::Watched<T>, which rereads the file when it changes"));
+            conds.push(
+                quote!(if ::core::matches!(<T as I>::SHAPE, S::File) && !<T as I>::WATCHED { #p }),
+            );
+        }
+        Some("restart") => {
+            let p = panic_msg(format!("docuconf: {field}: a Watched<T> field is reload \"watch\"; remove reload = \"restart\" or the Watched wrapper"));
+            conds.push(quote!(if <T as I>::WATCHED { #p }));
+        }
+        _ => {}
+    }
     let with = sf.with.as_deref().unwrap_or("");
     let has_with = with.contains("humantime");
     let has_option = has_with && with.contains("option") && sf.default;

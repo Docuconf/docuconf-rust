@@ -6,7 +6,7 @@ use std::fmt::Display;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use figment::providers::Serialized;
 use figment::value::{Dict, Value};
@@ -23,8 +23,7 @@ use crate::types;
 use crate::value::{self, Typed};
 use crate::Docuconf;
 
-/// Receives each warning `load` reports, without the `docuconf: ` prefix.
-type WarnFn = Arc<dyn Fn(&str) + Send + Sync>;
+use crate::reload::{self, WarnFn};
 
 /// Loads a `#[derive(Docuconf)]` struct, with options.
 ///
@@ -55,6 +54,7 @@ pub struct Loader<C> {
     now: Option<SystemTime>,
     termination_log: Option<bool>,
     warn: Option<WarnFn>,
+    watch_interval: Duration,
     _c: PhantomData<fn() -> C>,
 }
 
@@ -69,6 +69,7 @@ impl<C> Default for Loader<C> {
             now: None,
             termination_log: None,
             warn: None,
+            watch_interval: reload::DEFAULT_INTERVAL,
             _c: PhantomData,
         }
     }
@@ -171,6 +172,14 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
         self
     }
 
+    /// How often a [`Watched`](crate::Watched) input looks at its files for
+    /// a change: at most once per `interval`, when its content is asked
+    /// for. One second by default; `Duration::ZERO` looks on every access.
+    pub fn watch_interval(mut self, interval: Duration) -> Self {
+        self.watch_interval = interval;
+        self
+    }
+
     /// Whether to write the problems to `/dev/termination-log` (or
     /// `DOCUCONF_TERMINATION_LOG`) when loading fails, so `kubectl describe
     /// pod` shows them. On by default, off when [`env`](Loader::env)
@@ -182,7 +191,8 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
 
     /// Where `load` sends warnings: a set variable that looks like a typo of
     /// a declared one, a deprecated variable that is set, a feature-flag
-    /// name. By default each is printed to stderr as `docuconf: <warning>`.
+    /// name, a changed [`Watched`](crate::Watched) file that fails its
+    /// checks. By default each is printed to stderr as `docuconf: <warning>`.
     /// Pass `|w| tracing::warn!("{w}")` to route them to your logger, or
     /// `|_| {}` to drop them.
     pub fn on_warning(mut self, f: impl Fn(&str) + Send + Sync + 'static) -> Self {
@@ -550,18 +560,46 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
         let mut file_layer = Dict::new();
         let mut tokens = Vec::new();
         for f in &decl.files {
-            match files::check(f, &fcx) {
-                Outcome::Absent => {}
-                Outcome::Failed(v) => viols.extend(v),
+            let loaded = match files::check(f, &fcx) {
+                Outcome::Absent => None,
+                Outcome::Failed(v) => {
+                    viols.extend(v);
+                    continue;
+                }
                 Outcome::Loaded(b) => {
                     if let Some(w) = crate::contract::file_deprecation(f) {
                         self.warn(&w);
                     }
-                    let token = types::park(b);
-                    insert_path(&mut file_layer, &f.key, Value::from(token.clone()));
-                    tokens.push(token);
+                    Some(b)
                 }
-            }
+            };
+            // A watched input is parked even when absent, so that a
+            // `Watched<Option<T>>` picks up a file that appears later.
+            let parked: Box<dyn std::any::Any + Send> = if f.watch {
+                Box::new(reload::Parts {
+                    initial: loaded,
+                    source: reload::Source {
+                        decl: f.clone(),
+                        path: files::resolve_path(f, &fcx),
+                        values: f
+                            .password_var
+                            .iter()
+                            .filter_map(|n| values.get(n).map(|v| (n.clone(), v.clone())))
+                            .collect(),
+                        now: self.now,
+                        interval: self.watch_interval,
+                        warn: self.warn.clone(),
+                    },
+                })
+            } else {
+                match loaded {
+                    Some(b) => b,
+                    None => continue,
+                }
+            };
+            let token = types::park(parked);
+            insert_path(&mut file_layer, &f.key, Value::from(token.clone()));
+            tokens.push(token);
         }
         let discard = |tokens: &[String]| tokens.iter().for_each(|t| types::discard(t));
         if !viols.is_empty() {

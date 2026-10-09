@@ -214,3 +214,27 @@
 //!     keys: docuconf::KeySet,
 //! }
 //! ```
+//!
+//! `reload = "watch"` on a file input that is not a `Watched<T>`
+//! (`reload = "watch" needs the field type docuconf::Watched<T>`):
+//!
+//! ```compile_fail,E0080
+//! #[derive(serde::Deserialize, docuconf::Docuconf)]
+//! struct Config {
+//!     /// Licence key.
+//!     #[docuconf(path = "/etc/app/licence/licence.key", reload = "watch")]
+//!     licence: docuconf::TextFile,
+//! }
+//! ```
+//!
+//! The same field as a `Watched<T>` compiles, with or without the
+//! attribute:
+//!
+//! ```
+//! #[derive(serde::Deserialize, docuconf::Docuconf)]
+//! struct Config {
+//!     /// Licence key.
+//!     #[docuconf(path = "/etc/app/licence/licence.key", reload = "watch")]
+//!     licence: docuconf::Watched<docuconf::TextFile>,
+//! }
+//! ```

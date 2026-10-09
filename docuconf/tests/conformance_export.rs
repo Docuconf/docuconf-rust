@@ -6,12 +6,8 @@
 //! The golden contract comes from docuconf-go: `$DOCUCONF_GO_DIR`, or
 //! `../docuconf-go` next to this repository. The CLI is `$DOCUCONF_CLI`, or
 //! `docuconf` on `PATH`. The comparison is skipped when either is missing,
-//! unless `DOCUCONF_REQUIRE_EXPORT=1`.
-//!
-//! One difference is expected, and only that one: the fixture declares
-//! `reload: watch` on `settings` and `serving-tls`, and this SDK does not
-//! reload files in place yet, so it rejects `watch` at declaration time
-//! (SPEC §11.2 item 8) and declares them `restart`.
+//! unless `DOCUCONF_REQUIRE_EXPORT=1`. The export must match with no
+//! difference at all.
 #![cfg(all(feature = "tls", feature = "keystore"))]
 
 use std::path::PathBuf;
@@ -20,13 +16,9 @@ use std::time::Duration;
 
 use docuconf::{
     BinaryFile, CaBundle, ConfigFile, Docuconf, DocuconfEnum, Json, KeySet, Keystore, Meta, Secret,
-    TextFile, TlsKeyPair,
+    TextFile, TlsKeyPair, Watched,
 };
 use serde::Deserialize;
-
-/// The differences the comparison may report: `reload: watch`, which this
-/// SDK cannot declare yet.
-const EXPECTED_DIFFS: &[&str] = &["files.serving-tls.reload", "files.settings.reload"];
 
 /// Removes the keywords schemars adds that the fixture's schemas do not
 /// have: `format` (`int64`, ...), and `default: null` on an optional
@@ -171,7 +163,7 @@ struct Fixture {
         max_size = 65536,
         group = "general"
     )]
-    settings: ConfigFile<Settings>,
+    settings: Watched<ConfigFile<Settings>>,
 
     /// Routing rules
     #[docuconf(path = "/etc/app/rules/rules.yaml")]
@@ -189,7 +181,7 @@ struct Fixture {
         min_remaining = "720h",
         require_ca
     )]
-    serving_tls: Option<TlsKeyPair>,
+    serving_tls: Watched<Option<TlsKeyPair>>,
 
     /// CAs the service trusts
     #[docuconf(path = "/etc/app/trust/bundle.pem", min_certificates = 2)]
@@ -283,24 +275,8 @@ fn fixture_matches_the_golden_contract() {
         .unwrap_or_else(|e| panic!("running {}: {e}", cli.display()));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    if out.status.success() {
-        return;
-    }
-    // Every reported difference must be one of the expected ones, and each
-    // expected one must still be reported (so this list cannot go stale).
-    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
-    let unexpected: Vec<&&str> = lines
-        .iter()
-        .filter(|l| !EXPECTED_DIFFS.iter().any(|d| l.contains(d)))
-        .collect();
     assert!(
-        unexpected.is_empty() && !lines.is_empty(),
+        out.status.success(),
         "the export of the shared fixture does not match golden.cue:\n{stdout}{stderr}\n{cue}"
     );
-    for d in EXPECTED_DIFFS {
-        assert!(
-            lines.iter().any(|l| l.contains(d)),
-            "{d} now matches: remove it from EXPECTED_DIFFS\n{stdout}"
-        );
-    }
 }

@@ -3,6 +3,7 @@
 //! change in any release.
 
 pub use crate::decl::{DeclCx, FileKind, ItemKind, VarKind};
+pub use crate::reload::WatchedInput;
 
 /// A literal written in a `#[docuconf(...)]` attribute.
 #[derive(Debug, Clone, Copy)]
@@ -176,6 +177,8 @@ pub trait Input {
     const LITERAL: Literal;
     const INT_RANGE: (i128, i128) = (i128::MIN, i128::MAX);
     const ENUM_VALUES: Option<&'static [&'static str]> = None;
+    /// A `Watched<T>` file input (`reload: watch`).
+    const WATCHED: bool = false;
     fn declare(attrs: &FieldAttrs, cx: &mut DeclCx);
 }
 
@@ -187,6 +190,7 @@ impl<T: Input> Input for Option<T> {
     const LITERAL: Literal = T::LITERAL;
     const INT_RANGE: (i128, i128) = T::INT_RANGE;
     const ENUM_VALUES: Option<&'static [&'static str]> = T::ENUM_VALUES;
+    const WATCHED: bool = T::WATCHED;
     fn declare(attrs: &FieldAttrs, cx: &mut DeclCx) {
         cx.with_optional(|cx| T::declare(attrs, cx));
     }
@@ -348,6 +352,18 @@ where
                 bind: crate::schema::bind::<T>,
             },
         );
+    }
+}
+
+/// A file input declared `reload: watch`.
+impl<T: Input + WatchedInput> Input for crate::Watched<T> {
+    const SHAPE: Shape = T::SHAPE;
+    const SECRET: bool = T::SECRET;
+    const OPTIONAL: bool = T::OPTIONAL;
+    const LITERAL: Literal = T::LITERAL;
+    const WATCHED: bool = true;
+    fn declare(attrs: &FieldAttrs, cx: &mut DeclCx) {
+        cx.with_watch(|cx| T::declare(attrs, cx));
     }
 }
 

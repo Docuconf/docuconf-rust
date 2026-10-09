@@ -356,6 +356,9 @@ fn file_node(d: &FileDecl) -> Node {
     if let Some(p) = &d.path_env {
         add("pathEnv", Node::Str(p.clone()));
     }
+    if d.watch {
+        add("reload", Node::Str("watch".into()));
+    }
     if let Some(n) = d.max_size {
         add("maxSize", Node::Int(n as i64));
     }
