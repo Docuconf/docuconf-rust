@@ -14,7 +14,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
-use docuconf::{Docuconf, DocuconfEnum, Meta, Secret};
+use docuconf::{Docuconf, DocuconfEnum, KeySet, Meta, Secret};
 use serde::{Deserialize, Serialize};
 
 /// The service's configuration. The first paragraph of each `///` comment
@@ -60,25 +60,14 @@ struct Config {
 
     /// Keys that verify the signature on incoming payment webhooks.
     ///
-    /// A webhook is accepted when it is signed with any key in the list, so
-    /// the key can be rotated without turning webhooks away. To rotate:
-    ///
-    ///  1. add the new key as the second item, and roll out;
-    ///  2. switch the sender to the new key;
-    ///  3. remove the old key, and roll out.
-    ///
-    /// Each key is 32 to 256 characters, so an empty or truncated key fails
-    /// at boot. Without this variable, the service rejects every webhook.
-    // `Secret` marks the list `secret: true` and keeps every key out of
-    // `Debug` and serde output; `encoding = "csv"` reads `old,new`.
-    #[docuconf(
-        encoding = "csv",
-        min_items = 1,
-        max_items = 2,
-        item_min_length = 32,
-        item_max_length = 256
-    )]
-    webhook_keys: Option<Secret<Vec<String>>>,
+    /// A webhook is accepted when it is signed with any key in the set, so
+    /// the key can be rotated without turning webhooks away. Each key is 32
+    /// to 256 characters, so an empty or truncated key fails at boot.
+    /// Without this variable, the service rejects every webhook.
+    // A `KeySet` is always secret, keeps every key out of `Debug` and serde
+    // output, and reads `old,new` (csv). It holds 1 or 2 keys by default.
+    #[docuconf(key_min_length = 32, key_max_length = 256)]
+    webhook_keys: Option<KeySet>,
 }
 
 #[derive(Debug, Serialize, Deserialize, DocuconfEnum)]
@@ -166,8 +155,11 @@ fn serve(mut stream: TcpStream, config: &Config) -> std::io::Result<()> {
             ["POST", "/webhooks/payments"] => {
                 let mut payload = vec![0; content_length];
                 reader.read_exact(&mut payload)?;
-                let keys = config.webhook_keys.as_ref().map_or(&[][..], |k| k.expose());
-                if webhook::verify(keys, &payload, &signature) {
+                let ok = config
+                    .webhook_keys
+                    .as_ref()
+                    .is_some_and(|keys| webhook::verify(keys, &payload, &signature));
+                if ok {
                     ("204 No Content", "text/plain", String::new())
                 } else {
                     ("401 Unauthorized", "text/plain", "bad signature".into())
@@ -182,8 +174,9 @@ fn serve(mut stream: TcpStream, config: &Config) -> std::io::Result<()> {
     )
 }
 
-/// The loaded configuration, with typed values. `Secret` serializes as
-/// `"***"`, so the database URL and the webhook keys are redacted.
+/// The loaded configuration, with typed values. `Secret` and `KeySet`
+/// serialize as `"***"`, so the database URL and the webhook keys are
+/// redacted.
 fn config_json(c: &Config) -> String {
     serde_json::json!({
         "PORT": c.port,
@@ -220,8 +213,8 @@ mod tests {
             .load()
     }
 
-    fn keys(value: &str) -> Vec<String> {
-        load(value).unwrap().webhook_keys.unwrap().expose().clone()
+    fn keys(value: &str) -> KeySet {
+        load(value).unwrap().webhook_keys.unwrap()
     }
 
     /// Walks through a key rotation: each step is a rollout with a new
@@ -247,7 +240,7 @@ mod tests {
         }
         assert!(!webhook::verify(&keys(OLD), BODY, "not hex"));
         assert!(!webhook::verify(&keys(OLD), BODY, ""));
-        assert!(!webhook::verify(&[], BODY, &sign(OLD)));
+        assert!(!webhook::verify(&KeySet::new([NEW]), BODY, &sign(OLD)));
         assert!(load("").unwrap().webhook_keys.is_none());
     }
 

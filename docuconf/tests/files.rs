@@ -107,8 +107,9 @@ fn malformed_key_and_certificate() {
     assert_eq!(codes(&w, "serving-tls"), [Code::FileMalformed]);
 
     let w = World::new();
+    // No PEM certificate at all is malformed (SPEC §11.2 item 5).
     w.write("/etc/gateway/tls/tls.crt", b"no pem here");
-    assert_eq!(codes(&w, "serving-tls"), [Code::CertificateInvalid]);
+    assert_eq!(codes(&w, "serving-tls"), [Code::FileMalformed]);
 }
 
 #[test]

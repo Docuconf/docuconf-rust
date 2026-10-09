@@ -89,7 +89,7 @@ pub(crate) fn tls(c: &Ctx) -> R {
         .map_err(|e| vec![c.v(Code::CertificateInvalid, format!("tls.crt: {e}"))])?;
     if chain.is_empty() {
         return Err(vec![
-            c.v(Code::CertificateInvalid, "tls.crt holds no PEM certificate")
+            c.v(Code::FileMalformed, "tls.crt holds no PEM certificate")
         ]);
     }
     let Ok(key) = PrivateKeyDer::from_pem_slice(&key_pem) else {
@@ -258,14 +258,11 @@ pub(crate) fn keystore(c: &Ctx) -> R {
     };
     let password = match &d.password_var {
         None => String::new(),
+        // An unset password variable is an empty password (SPEC §11.2
+        // item 7): a keystore may be written without one.
         Some(var) => match c.cx.values.get(var) {
             Some(Typed::Str(p)) => p.clone(),
-            _ => {
-                return Err(vec![c.v(
-                    Code::KeystoreUnreadable,
-                    format!("cannot open: its password variable {var} is not set"),
-                )])
-            }
+            _ => String::new(),
         },
     };
     let ks = p12_keystore::KeyStore::from_pkcs12(

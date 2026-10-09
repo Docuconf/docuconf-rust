@@ -63,6 +63,11 @@ pub struct FieldAttrs {
     pub item_max: Option<Lit>,
     pub item_min_length: Option<u64>,
     pub item_max_length: Option<u64>,
+    /// A key set's `minKeys`, `maxKeys`, `keyMinLength` and `keyMaxLength`.
+    pub min_keys: Option<u64>,
+    pub max_keys: Option<u64>,
+    pub key_min_length: Option<u64>,
+    pub key_max_length: Option<u64>,
     /// A list's wire encoding: `json` (the default) or `csv`.
     pub encoding: Option<&'static str>,
     /// The separator of a `csv` list; `,` by default.
@@ -160,7 +165,7 @@ pub const fn contains(values: &[&str], s: &str) -> bool {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a docuconf input type",
     label = "docuconf cannot declare a field of this type",
-    note = "use String, an integer, f32/f64, bool, std::time::Duration, url::Url, Vec<String> or Vec<integer>, docuconf::Json<T>, docuconf::Secret<T>, Option<T>, a #[derive(DocuconfEnum)] enum, a file input type or a nested #[derive(Docuconf)] struct",
+    note = "use String, an integer, f32/f64, bool, std::time::Duration, url::Url, Vec<String> or Vec<integer>, docuconf::KeySet, docuconf::Json<T>, docuconf::Secret<T>, Option<T>, a #[derive(DocuconfEnum)] enum, a file input type or a nested #[derive(Docuconf)] struct",
     note = "for a map, use docuconf::Json<HashMap<..>>; to load the field some other way, mark it #[docuconf(skip)]"
 )]
 pub trait Input {
@@ -301,6 +306,15 @@ impl<T: ListItem> Input for Vec<T> {
     const LITERAL: Literal = Literal::List;
     fn declare(attrs: &FieldAttrs, cx: &mut DeclCx) {
         cx.var(attrs, VarKind::List(T::item()));
+    }
+}
+
+/// A key set is always secret, so it takes no default.
+impl Input for crate::KeySet {
+    const SECRET: bool = true;
+    const LITERAL: Literal = Literal::None;
+    fn declare(attrs: &FieldAttrs, cx: &mut DeclCx) {
+        cx.var(attrs, VarKind::KeySet);
     }
 }
 

@@ -182,7 +182,7 @@ fn typed_node(t: &Typed) -> Node {
         Typed::Int(i) => Node::Int(*i),
         Typed::Float(f) => Node::Float(*f),
         Typed::Bool(b) => Node::Bool(*b),
-        Typed::Dur(d) => Node::Str(crate::duration::format_go(*d)),
+        Typed::Dur(d) => Node::Str(crate::duration::format_signed(*d)),
         Typed::List(l) => Node::List(l.iter().map(typed_node).collect()),
         Typed::Json(j) => Node::from_json(j),
     }
@@ -303,6 +303,24 @@ fn var_node(v: &VarDecl, file_default: Option<&Typed>, config_key: Option<&Strin
             }
             if let Some(n) = v.item_max_length {
                 add("itemMaxLength", Node::Int(n as i64));
+            }
+        }
+        VarKind::KeySet => {
+            add("encoding", Node::Str(v.list_encoding.name().into()));
+            if let ListEncoding::Csv(sep) = &v.list_encoding {
+                add("separator", Node::Str(sep.clone()));
+            }
+            if let Some(n) = v.min_items {
+                add("minKeys", Node::Int(n as i64));
+            }
+            if let Some(n) = v.max_items {
+                add("maxKeys", Node::Int(n as i64));
+            }
+            if let Some(n) = v.item_min_length {
+                add("keyMinLength", Node::Int(n as i64));
+            }
+            if let Some(n) = v.item_max_length {
+                add("keyMaxLength", Node::Int(n as i64));
             }
         }
         VarKind::Json { schema, .. } => {

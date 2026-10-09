@@ -13,29 +13,49 @@ const GO_HINT: &str = "is not a duration such as \"1m30s\"";
 const GO_UNITS: &str = "ns, us, ms, s, m or h";
 
 /// Parses a Go duration (`1m30s`, `720h`, `250ms`, `1.5h`, `90us`), exactly
-/// as Go's `time.ParseDuration` does, except that a negative duration is
-/// rejected. Units Go does not know (`2d`, `1 hour`), which `humantime`
-/// would accept, are rejected, so a value that boots also passes the
-/// platform's `docuconf vet`. Surrounding whitespace is rejected, since
-/// values are never trimmed. Messages never repeat the value.
+/// as Go's `time.ParseDuration` does (SPEC §5), except that a negative
+/// duration is rejected, since a `std::time::Duration` cannot hold it. Units
+/// Go does not know (`2d`, `1 hour`), which `humantime` would accept, are
+/// rejected, so a value that boots also passes the platform's `docuconf
+/// vet`. Surrounding whitespace is rejected, since values are never
+/// trimmed. Messages never repeat the value.
 pub(crate) fn parse_duration(s: &str) -> Result<Duration, String> {
+    let n = parse_go(s)?;
+    if n < 0 {
+        return Err(format!("{GO_HINT} (it is negative)"));
+    }
+    Ok(from_nanos(n as u128).expect("at most 2^63-1 nanoseconds"))
+}
+
+/// Parses a Go duration, signed, as nanoseconds: an optional sign, then
+/// `0` or one or more decimal numbers each followed by a unit (SPEC §5).
+/// The result is truncated to whole nanoseconds, and a value beyond
+/// ±2^63-1 nanoseconds is rejected, as Go's `time.ParseDuration` does.
+pub(crate) fn parse_go(s: &str) -> Result<i128, String> {
     let bad = |why: &str| format!("{GO_HINT} ({why})");
     if s.trim() != s {
         return Err(bad("it has surrounding whitespace"));
     }
     let mut rest = s;
+    let mut negative = false;
     if let Some(r) = rest.strip_prefix('+') {
         rest = r;
-    } else if rest.starts_with('-') {
-        return Err(bad("it is negative"));
+    } else if let Some(r) = rest.strip_prefix('-') {
+        rest = r;
+        negative = true;
     }
     if rest == "0" {
-        return Ok(Duration::ZERO);
+        return Ok(0);
     }
     if rest.is_empty() {
         return Err(GO_HINT.to_string());
     }
-    const MAX: u128 = i64::MAX as u128;
+    // Go allows -2^63 nanoseconds, one more than the positive limit.
+    let max: u128 = if negative {
+        1u128 << 63
+    } else {
+        i64::MAX as u128
+    };
     let mut total: u128 = 0;
     while !rest.is_empty() {
         let int_len = rest.bytes().take_while(u8::is_ascii_digit).count();
@@ -71,7 +91,7 @@ pub(crate) fn parse_duration(s: &str) -> Result<Duration, String> {
         } else {
             int.parse::<u128>()
                 .ok()
-                .filter(|v| *v <= MAX)
+                .filter(|v| *v <= max)
                 .ok_or_else(|| bad("it is too large"))?
         };
         let mut n = whole
@@ -85,25 +105,25 @@ pub(crate) fn parse_duration(s: &str) -> Result<Duration, String> {
             n += f.parse::<u128>().unwrap_or(0) * unit / scale;
         }
         total = total.checked_add(n).ok_or_else(|| bad("it is too large"))?;
-        if total > MAX {
+        if total > max {
             return Err(bad("it is too large"));
         }
     }
-    Ok(Duration::new(
-        (total / 1_000_000_000) as u64,
-        (total % 1_000_000_000) as u32,
-    ))
+    let total = total as i128;
+    Ok(if negative { -total } else { total })
 }
 
 /// Parses a duration in one of the wire encodings of SPEC §5.
-pub(crate) fn parse_encoded(enc: DurationEncoding, s: &str) -> Result<Duration, String> {
+/// The result is in nanoseconds; only the `go` encoding has a sign.
+pub(crate) fn parse_encoded(enc: DurationEncoding, s: &str) -> Result<i128, String> {
+    let nanos = |d: Option<Duration>| d.map(|d| d.as_nanos() as i128);
     match enc {
-        DurationEncoding::Go => parse_duration(s),
-        DurationEncoding::Iso8601 => parse_iso8601(s)
+        DurationEncoding::Go => parse_go(s),
+        DurationEncoding::Iso8601 => nanos(parse_iso8601(s))
             .ok_or_else(|| "is not an ISO 8601 duration such as \"PT90S\"".to_string()),
-        DurationEncoding::Seconds => parse_seconds(s)
+        DurationEncoding::Seconds => nanos(parse_seconds(s))
             .ok_or_else(|| "is not a number of seconds such as \"90\" or \"1.5\"".to_string()),
-        DurationEncoding::Timespan => parse_timespan(s).ok_or_else(|| {
+        DurationEncoding::Timespan => nanos(parse_timespan(s)).ok_or_else(|| {
             "is not a TimeSpan such as \"00:01:30\" or \"1.02:03:04.5\"".to_string()
         }),
     }
@@ -134,14 +154,15 @@ const NS_SEC: u128 = 1_000_000_000;
 
 static ISO8601: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^P(?:([0-9]+)D)?(?:T(?:([0-9]+)H)?(?:([0-9]+)M)?(?:([0-9]+)(?:[.,]([0-9]+))?S)?)?$",
+        r"^P(?:([0-9]+)(?:[.,]([0-9]+))?D)?(?:T(?:([0-9]+)(?:[.,]([0-9]+))?H)?(?:([0-9]+)(?:[.,]([0-9]+))?M)?(?:([0-9]+)(?:[.,]([0-9]+))?S)?)?$",
     )
     .unwrap()
 });
 
-/// ISO 8601 durations with days, hours, minutes and (fractional) seconds,
-/// as java.time.Duration and pydantic read them: `PT90S`, `PT1.5S`,
-/// `P1DT2H`. Years, months and weeks have no fixed length and are rejected.
+/// ISO 8601 durations with days, hours, minutes and seconds, each with an
+/// optional fraction after `.` or `,` (SPEC §5): `PT90S`, `PT1,5S`,
+/// `P1DT2H`. Years, months and weeks have no fixed length and are
+/// rejected.
 fn parse_iso8601(s: &str) -> Option<Duration> {
     let c = ISO8601.captures(s)?;
     // "P" alone, or a "T" with nothing after it, is not a duration.
@@ -149,13 +170,16 @@ fn parse_iso8601(s: &str) -> Option<Duration> {
         return None;
     }
     let mut n: u128 = 0;
-    for (i, unit) in [(1, 86_400 * NS_SEC), (2, 3_600 * NS_SEC), (3, 60 * NS_SEC)] {
+    for (i, unit) in [
+        (1, 86_400 * NS_SEC),
+        (3, 3_600 * NS_SEC),
+        (5, 60 * NS_SEC),
+        (7, NS_SEC),
+    ] {
         if let Some(m) = c.get(i) {
-            n = n.checked_add(nanos(m.as_str(), None, unit)?)?;
+            let frac = c.get(i + 1).map(|f| f.as_str());
+            n = n.checked_add(nanos(m.as_str(), frac, unit)?)?;
         }
-    }
-    if let Some(m) = c.get(4) {
-        n = n.checked_add(nanos(m.as_str(), c.get(5).map(|f| f.as_str()), NS_SEC)?)?;
     }
     from_nanos(n)
 }
@@ -190,6 +214,18 @@ fn parse_timespan(s: &str) -> Option<Duration> {
         .checked_add(h * 3_600 * NS_SEC + m * 60 * NS_SEC)?
         .checked_add(nanos(&c[4], c.get(5).map(|f| f.as_str()), NS_SEC)?)?;
     from_nanos(n)
+}
+
+/// Formats a signed number of nanoseconds in canonical Go form, with a
+/// leading `-` when it is negative (`-1m30s`).
+pub(crate) fn format_signed(n: i128) -> String {
+    let abs = n.unsigned_abs();
+    let d = Duration::new((abs / 1_000_000_000) as u64, (abs % 1_000_000_000) as u32);
+    if n < 0 {
+        format!("-{}", format_go(d))
+    } else {
+        format_go(d)
+    }
 }
 
 /// Formats a duration in canonical Go form: `1h30m`, `1m30s`, `1s500ms`,
@@ -291,7 +327,10 @@ mod tests {
     #[test]
     fn parses_every_encoding() {
         use DurationEncoding::*;
-        let ok = |e, s: &str| parse_encoded(e, s).unwrap_or_else(|m| panic!("{s}: {m}"));
+        let ok = |e, s: &str| {
+            let n = parse_encoded(e, s).unwrap_or_else(|m| panic!("{s}: {m}"));
+            Duration::from_nanos(u64::try_from(n).expect("non-negative"))
+        };
         assert_eq!(ok(Iso8601, "PT90S"), Duration::from_secs(90));
         assert_eq!(ok(Iso8601, "PT1.5S"), Duration::from_millis(1500));
         assert_eq!(ok(Iso8601, "PT0.001S"), Duration::from_millis(1));
@@ -323,6 +362,12 @@ mod tests {
             assert!(parse_encoded(Timespan, bad).is_err(), "{bad}");
         }
         assert_eq!(ok(Go, "1h2m3s4ms"), Duration::from_millis(3_723_004));
+        assert_eq!(ok(Iso8601, "PT1,5S"), Duration::from_millis(1500));
+        assert_eq!(ok(Iso8601, "PT1.5H"), Duration::from_secs(5400));
+        assert_eq!(parse_encoded(Go, "-1m30s"), Ok(-90_000_000_000));
+        assert_eq!(format_signed(-90_000_000_000), "-1m30s");
+        assert_eq!(parse_go("-2562047h47m16.854775808s"), Ok(i64::MIN as i128));
+        assert!(parse_go("2562047h47m16.854775808s").is_err());
         assert!(parse_encoded(Go, "PT90S").is_err());
     }
 }

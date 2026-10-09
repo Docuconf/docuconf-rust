@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use figment::providers::{Format, Json, Toml, Yaml};
+use figment::providers::{Format, Toml};
 use figment::Figment;
 
 use crate::decl::{FileDecl, FileKind};
@@ -192,6 +192,19 @@ fn text(c: &Ctx) -> R {
 
 const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 
+/// Parses a `json`, `yaml` or `toml` document as JSON, so config files and
+/// overlays in every format are checked the same way. Any JSON value is a
+/// document, not only an object.
+pub(crate) fn parse_structured(format: &str, src: &str) -> Result<serde_json::Value, String> {
+    match format {
+        "yaml" => serde_yaml::from_str(src).map_err(|e| e.to_string()),
+        "toml" => Figment::from(Toml::string(src))
+            .extract()
+            .map_err(|e| e.to_string()),
+        _ => serde_json::from_str(src).map_err(|e| e.to_string()),
+    }
+}
+
 fn config(c: &Ctx, schema: &serde_json::Value, bind: crate::decl::BindFn) -> R {
     let d = c.decl;
     let Some(bytes) = c.read(&c.path, d.required).map_err(|v| vec![v])? else {
@@ -209,13 +222,7 @@ fn config(c: &Ctx, schema: &serde_json::Value, bind: crate::decl::BindFn) -> R {
     let Ok(src) = std::str::from_utf8(bytes) else {
         return Err(vec![c.v(Code::FileMalformed, "is not valid UTF-8")]);
     };
-    // Parse with figment's own providers, the host's parsers.
-    let fig = match format {
-        "yaml" => Figment::from(Yaml::string(src)),
-        "toml" => Figment::from(Toml::string(src)),
-        _ => Figment::from(Json::string(src)),
-    };
-    let doc: serde_json::Value = match fig.extract() {
+    let doc = match parse_structured(format, src) {
         Ok(v) => v,
         Err(e) => {
             let what = format.to_uppercase();

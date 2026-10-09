@@ -64,15 +64,15 @@ done
 echo "bad env: exited non-zero with:"
 sed 's/^/  /' "$tmp/bad.txt"
 
-# 4. A key set with an empty second key (a trailing comma): the item
-# length constraint fails it at boot, without printing the key.
+# 4. A key set with an empty second key (a trailing comma): an empty key
+# is never valid, so it fails at boot, without printing the key.
 set +e
 PORT=$port DATABASE_URL="$secret" WEBHOOK_KEYS="$old_key," "$bin" >"$tmp/bad.txt" 2>&1
 code=$?
 set -e
 cat >"$tmp/want.txt" <<'WANT'
 docuconf: 1 configuration problem:
-  WEBHOOK_KEYS: value has item 1 of 0 characters, below itemMinLength 32 (out_of_range)
+  WEBHOOK_KEYS: value has an empty key at position 1 (out_of_range)
 WANT
 if [ "$code" != 1 ] || ! diff -u "$tmp/want.txt" "$tmp/bad.txt" || grep -q webhook-key "$tmp/bad.txt"; then
   echo "want exit 1 for an empty webhook key, got $code:" >&2; cat "$tmp/bad.txt" >&2; exit 1

@@ -554,6 +554,9 @@ impl<C: Docuconf + DeserializeOwned> Loader<C> {
                 Outcome::Absent => {}
                 Outcome::Failed(v) => viols.extend(v),
                 Outcome::Loaded(b) => {
+                    if let Some(w) = crate::contract::file_deprecation(f) {
+                        self.warn(&w);
+                    }
                     let token = types::park(b);
                     insert_path(&mut file_layer, &f.key, Value::from(token.clone()));
                     tokens.push(token);

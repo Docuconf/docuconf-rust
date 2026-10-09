@@ -70,6 +70,165 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Secret<T> {
     }
 }
 
+/// A set of secret keys that are all valid at once, so a key can be
+/// rotated without an outage (contract type `keySet`, SPEC §4.3 and §6.1).
+/// It is for the side that verifies: webhook signatures, inbound API keys,
+/// JWT HMAC verification, cookie-signing fallbacks.
+///
+/// ```
+/// #[derive(serde::Deserialize, docuconf::Docuconf)]
+/// struct Config {
+///     /// Keys that verify the signature on incoming webhooks.
+///     #[docuconf(key_min_length = 32, key_max_length = 256)]
+///     webhook_keys: docuconf::KeySet,
+/// }
+/// ```
+///
+/// A key set is always secret. The platform supplies it like a secret
+/// list, as one Secret key holding `old,new` during a rotation (`csv`, the
+/// default; `encoding = "json"` takes a JSON array, and `separator` changes
+/// the comma). The attributes are `min_keys` (default 1, at least 1),
+/// `max_keys` (default 2), `key_min_length` and `key_max_length`, in
+/// characters. Keys are never trimmed, and an empty key (a stray
+/// separator) is always `out_of_range`.
+///
+/// A rotation takes three steps, which the generated docs print: add the
+/// new key and roll out; switch the sender to the new key; remove the old
+/// key and roll out.
+///
+/// Like [`Secret`], a key set prints as `***` under `Debug`, `Display`
+/// and `Serialize`. Check a candidate with [`contains`](KeySet::contains)
+/// or [`verify`](KeySet::verify), which take the same time whichever key
+/// matches.
+///
+/// ```
+/// let keys = docuconf::KeySet::new(["old-key", "new-key"]);
+/// assert!(keys.contains("new-key"));
+/// assert!(!keys.contains("new-ke"));
+/// assert_eq!(format!("{keys:?} {keys}"), "KeySet(***) ***");
+/// assert_eq!(serde_json::to_string(&keys).unwrap(), r#""***""#);
+/// ```
+#[derive(Clone)]
+pub struct KeySet {
+    keys: Vec<String>,
+}
+
+impl KeySet {
+    /// A key set holding `keys`, in order. Meant for tests: an app gets its
+    /// key set from [`load`](crate::load).
+    pub fn new<I, K>(keys: I) -> Self
+    where
+        I: IntoIterator<Item = K>,
+        K: Into<String>,
+    {
+        KeySet {
+            keys: keys.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// The keys, in the order the platform gave them. Take care not to
+    /// log them.
+    pub fn keys(&self) -> &[String] {
+        &self.keys
+    }
+
+    /// The number of keys.
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Whether the set has no keys (never true for a loaded key set, which
+    /// has at least `min_keys`).
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// Whether `candidate` is one of the keys, such as an API key a caller
+    /// presents. It compares `candidate` with every key in constant time,
+    /// so the time taken does not say which key matched, or how much of
+    /// one; it depends only on the number of keys and their lengths.
+    pub fn contains(&self, candidate: impl AsRef<[u8]>) -> bool {
+        let candidate = candidate.as_ref();
+        let mut found = 0u8;
+        for key in &self.keys {
+            found |= u8::from(constant_time_eq(key.as_bytes(), candidate));
+        }
+        found == 1
+    }
+
+    /// Calls `check` with each key and returns whether any call returned
+    /// true. It is for checks that need the key itself, such as an HMAC:
+    ///
+    /// ```
+    /// let keys = docuconf::KeySet::new(["old-key", "new-key"]);
+    /// let (body, signature) = (&b"payload"[..], &b"new-key:payload"[..]);
+    /// let ok = keys.verify(|key| {
+    ///     // Real code computes the HMAC of `body` with `key` and compares
+    ///     // it with `signature` in constant time (as hmac's verify_slice).
+    ///     [key, b":", body].concat() == signature
+    /// });
+    /// assert!(ok);
+    /// ```
+    ///
+    /// Every key is tried, even after one matches, so the time taken does
+    /// not say which key matched. `check` should compare in constant time
+    /// itself.
+    pub fn verify(&self, mut check: impl FnMut(&[u8]) -> bool) -> bool {
+        let mut ok = false;
+        for key in &self.keys {
+            ok |= check(key.as_bytes());
+        }
+        ok
+    }
+}
+
+/// Compares two byte strings in time that depends only on their lengths.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    std::hint::black_box(diff) == 0
+}
+
+impl fmt::Debug for KeySet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("KeySet(***)")
+    }
+}
+
+/// Two key sets are equal when they hold the same keys in the same order;
+/// each pair of keys is compared in constant time.
+impl PartialEq for KeySet {
+    fn eq(&self, other: &Self) -> bool {
+        self.keys.len() == other.keys.len()
+            && self.keys.iter().zip(&other.keys).fold(true, |ok, (a, b)| {
+                constant_time_eq(a.as_bytes(), b.as_bytes()) & ok
+            })
+    }
+}
+
+impl fmt::Display for KeySet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("***")
+    }
+}
+
+impl serde::Serialize for KeySet {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str("***")
+    }
+}
+
+impl<'de> Deserialize<'de> for KeySet {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Vec::<String>::deserialize(d).map(|keys| KeySet { keys })
+    }
+}
+
 /// A structured value in one variable, sent as compact JSON (contract type
 /// `json`). Its schema is generated from `T` with `schemars`.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
