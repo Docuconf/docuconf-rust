@@ -219,6 +219,8 @@ pub(crate) struct FileDecl {
     pub secret: bool,
     pub path: String,
     pub path_env: Option<String>,
+    /// `reload: watch`: the field is a `Watched<T>`.
+    pub watch: bool,
     pub max_size: Option<u64>,
     pub group: Option<String>,
     pub deprecated: Option<String>,
@@ -274,6 +276,8 @@ pub struct DeclCx {
     keys: Vec<String>,
     optional: bool,
     secret: bool,
+    /// Inside `Watched<T>`; `Some(true)` when that is inside an `Option`.
+    watch: Option<bool>,
     vars: Vec<VarDecl>,
     files: Vec<FileDecl>,
     problems: Vec<String>,
@@ -478,6 +482,7 @@ impl DeclCx {
             keys: Vec::new(),
             optional: false,
             secret: false,
+            watch: None,
             vars: Vec::new(),
             files: Vec::new(),
             problems: Vec::new(),
@@ -497,6 +502,14 @@ impl DeclCx {
         let old = std::mem::replace(&mut self.secret, true);
         f(self);
         self.secret = old;
+    }
+
+    /// Marks the file input being declared as `reload: watch`
+    /// (`Watched<T>`).
+    pub fn with_watch(&mut self, f: impl FnOnce(&mut DeclCx)) {
+        let old = self.watch.replace(self.optional);
+        f(self);
+        self.watch = old;
     }
 
     fn take_flags(&mut self) -> (bool, bool) {
@@ -880,6 +893,7 @@ impl DeclCx {
     /// Declares one file input.
     pub fn file(&mut self, a: &FieldAttrs, kind: FileKind) {
         let (optional, wrapped_secret) = self.take_flags();
+        let watched = self.watch.take();
         let name = match a.name {
             Some(n) => n.to_string(),
             None => a.key.replace('_', "-"),
@@ -931,12 +945,21 @@ impl DeclCx {
                 problems.push(format!("path_env {pe:?} is not a variable name"));
             }
         }
-        match a.reload {
-            None | Some("restart") => {}
-            Some("watch") => problems.push(
-                "reload = \"watch\" is not implemented by this SDK version; use \"restart\"".into(),
+        match (a.reload, watched) {
+            (_, Some(true)) => problems.push(
+                "Option<Watched<T>> cannot pick up a file that appears after boot; use Watched<Option<T>>"
+                    .into(),
             ),
-            Some(other) => {
+            (None, _) | (Some("restart"), None) | (Some("watch"), Some(false)) => {}
+            (Some("watch"), None) => problems.push(
+                "reload = \"watch\" needs the field type docuconf::Watched<T>, which rereads the file when it changes"
+                    .into(),
+            ),
+            (Some("restart"), Some(_)) => problems.push(
+                "a Watched<T> field is reload \"watch\"; remove reload = \"restart\" or the Watched wrapper"
+                    .into(),
+            ),
+            (Some(other), _) => {
                 problems.push(format!("reload {other:?} must be \"restart\" or \"watch\""))
             }
         }
@@ -1060,6 +1083,7 @@ impl DeclCx {
             secret,
             path,
             path_env: a.path_env.map(str::to_string),
+            watch: watched.is_some(),
             max_size,
             group: a.group.map(str::to_string),
             deprecated: a.deprecated.map(str::to_string),

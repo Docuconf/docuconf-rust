@@ -636,6 +636,7 @@ fn file_decl(name: &str, spec: &Json) -> Result<FileDecl, Vec<String>> {
         secret,
         path,
         path_env,
+        watch: f.str("reload") == Some("watch"),
         max_size,
         group: f.str("group").map(str::to_string),
         deprecated,

@@ -277,7 +277,10 @@ pub(crate) fn discard(token: &str) {
     }
 }
 
-fn unpark<'de, D: Deserializer<'de>, T: 'static>(d: D, what: &str) -> Result<T, D::Error> {
+pub(crate) fn unpark<'de, D: Deserializer<'de>, T: 'static>(
+    d: D,
+    what: &str,
+) -> Result<T, D::Error> {
     let token = String::deserialize(d)?;
     let id = token
         .strip_prefix(TOKEN)
@@ -563,10 +566,16 @@ pub(crate) struct ConfigDoc {
 impl<'de, T: DeserializeOwned> Deserialize<'de> for ConfigFile<T> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let doc: ConfigDoc = unpark(d, "config file")?;
-        let value = T::deserialize(&doc.doc).map_err(D::Error::custom)?;
-        Ok(ConfigFile {
-            path: doc.path,
-            value,
-        })
+        config_file(doc).map_err(D::Error::custom)
     }
+}
+
+pub(crate) fn config_file<T: DeserializeOwned>(
+    doc: ConfigDoc,
+) -> Result<ConfigFile<T>, serde_json::Error> {
+    let value = T::deserialize(&doc.doc)?;
+    Ok(ConfigFile {
+        path: doc.path,
+        value,
+    })
 }

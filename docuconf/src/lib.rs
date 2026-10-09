@@ -57,7 +57,8 @@
 //!
 //! At boot, `let config: Config = docuconf::load_or_exit();`.
 //! [`Loader`] adds the app's own config files, profiles and a platform
-//! config-file [`Overlay`]. [`Contract`] validates an environment against a
+//! config-file [`Overlay`]. A [`Watched<T>`] file input rereads its file
+//! when it changes (`reload: watch`). [`Contract`] validates an environment against a
 //! contract given as JSON, with no Rust declaration (contract-first mode).
 //!
 //! ## Types
@@ -77,6 +78,7 @@
 //! | [`Secret<T>`] | `T`, with `secret: true` |
 //! | `Option<T>` | `T`, optional |
 //! | [`ConfigFile<T>`], `TlsKeyPair`, `CaBundle`, `Keystore`, [`TextFile`], [`BinaryFile`] | file inputs |
+//! | [`Watched<T>`] of a file input type (or of an `Option` of one) | the file input, `reload: watch` |
 //! | a nested `#[derive(Docuconf)]` struct | its fields, named `PARENT__CHILD` |
 //!
 //! A field without `Option` and without a `default` is required.
@@ -144,6 +146,7 @@ mod load;
 mod overlay;
 #[cfg(feature = "tls")]
 mod pki;
+mod reload;
 mod schema;
 mod types;
 mod value;
@@ -158,6 +161,7 @@ pub use error::{Code, DeclarationError, Error, ValidationError, Violation};
 pub use export::Meta;
 pub use load::{Export, Loader};
 pub use overlay::{Overlay, OverlayFormat, Reload};
+pub use reload::Watched;
 #[cfg(feature = "keystore")]
 pub use types::Keystore;
 pub use types::{BinaryFile, ConfigFile, Json, KeySet, Secret, TextFile};

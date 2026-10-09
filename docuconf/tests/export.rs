@@ -109,9 +109,9 @@ fn declaration_errors() {
         /// A file input under a reserved directory.
         #[docuconf(path = "/etc/ca.pem")]
         ca: docuconf::CaBundle,
-        /// Watching is not implemented.
-        #[docuconf(path = "/etc/app/notes/notes.txt", reload = "watch")]
-        notes: docuconf::TextFile,
+        /// An optional watched file is Watched<Option<T>>.
+        #[docuconf(path = "/etc/app/notes/notes.txt")]
+        notes: Option<docuconf::Watched<docuconf::TextFile>>,
         /// The password of a keystore must be a secret.
         #[docuconf(path = "/etc/app/ks/ks.p12", password_var = "LOWER_NOT_SECRET")]
         ks: docuconf::Keystore,
@@ -136,7 +136,7 @@ fn declaration_errors() {
         "LOOK (Bad.look): pattern \"(?=x)\" is not valid RE2",
         "STR_MIN (Bad.str_min): attribute `min` does not apply to a string variable",
         "file input ca (Bad.ca): would be mounted at /etc",
-        "file input notes (Bad.notes): reload = \"watch\" is not implemented",
+        "file input notes (Bad.notes): Option<Watched<T>> cannot pick up a file",
         "file input ks (Bad.ks): password_var LOWER_NOT_SECRET must be a secret variable",
         "NAMES (Bad.names): attribute `item_min` does not apply to a list of strings variable",
         "IDS (Bad.ids): item_min 300 is above item_max 255",

@@ -337,6 +337,7 @@ reading the environment and the declared files.
 | `Keystore` (feature `keystore`) | file `keystore` (PKCS#12): `password_var` names a secret variable |
 | `TextFile` | file `text`: `pattern`, `min_length`, `max_length` |
 | `BinaryFile` | file `binary` |
+| `Watched<T>`, `T` any file type above or an `Option` of one | the same file input with `reload: "watch"` |
 
 For `ConfigFile<T>` and `Json<T>`, derive `docuconf::JsonSchema` with `#[schemars(crate = "docuconf::schemars")]`
 as in the first example; then the app needs no `schemars` dependency. (If the app depends on `schemars` 1.x
@@ -351,7 +352,7 @@ Variable attributes: `default`, `required`, `secret`, `min`, `max`, `min_length`
 matches anywhere: anchor with `^`/`$`), `values`, `schemes`, `min_items`, `max_items`, `item_min`, `item_max`,
 `item_min_length`, `item_max_length`, `encoding` (`"json"` or `"csv"`, for a list), `separator`, `group`, `examples`, `deprecated`, `replaced_by`, `config_key`, `env`,
 `description`, `details`, `skip`. File attributes: `path` (required), `name` (input name; default is the field name with
-`-`), `path_env`, `reload` (only `"restart"`; `"watch"` is not implemented yet and is rejected), `max_size`
+`-`), `path_env`, `reload` (`"restart"`, or `"watch"` on a `Watched<T>` field, which declares it anyway), `max_size`
 (`65536` or `"64Ki"`), `required`, `secret`, `description`, `details`, `group`, `deprecated`, plus the type-specific ones above. The struct
 takes `prefix`.
 
@@ -473,6 +474,50 @@ keystores open with their password (`p12-keystore`); text files are UTF-8 and ma
 
 `DOCUCONF_FILE_ROOT` is prepended to every absolute file path, including paths read from a `path_env` variable,
 for local development and tests.
+
+## Reloading files
+
+A file input whose field is `Watched<T>` is declared `reload: "watch"`: the app rereads it when it changes, so
+a renewed certificate or an updated ConfigMap reaches it without a rollout, and the platform does not list its
+source as a restart trigger.
+
+```rust
+use docuconf::{ConfigFile, TextFile, Watched};
+
+#[derive(serde::Deserialize, docuconf::Docuconf)]
+pub struct Config {
+    /// Feature flags, changed without a rollout.
+    #[docuconf(path = "/etc/app/flags/flags.json")]
+    pub flags: Watched<ConfigFile<Flags>>,
+
+    /// Banner shown on the home page, when there is one.
+    #[docuconf(path = "/etc/app/banner/banner.txt", max_length = 200)]
+    pub banner: Watched<Option<TextFile>>,
+}
+
+#[derive(serde::Deserialize, docuconf::JsonSchema)]
+#[schemars(crate = "docuconf::schemars")]
+pub struct Flags {
+    pub new_checkout: bool,
+}
+
+pub fn new_checkout(config: &Config) -> bool {
+    config.flags.current().new_checkout
+}
+```
+
+`current()` returns an `Arc<T>` of the current content. At most once a second (`Loader::watch_interval`
+changes that) it first looks at the metadata of the files the input reads, following symlinks, so the
+`..data` symlink swap Kubernetes makes when it updates a projected volume shows up as a different file; there is
+no background thread and no extra dependency. `refresh()` looks right away. A change is read again and passes
+the same checks as at boot. A changed file that fails them is not used: the previous content stays current and
+each problem goes to `Loader::on_warning` (stderr by default) once per change, with its code and never the
+file's content, for example `settings: changed file rejected, keeping the previous content: is not a valid JSON
+document: ... (file_malformed)`. An optional input is `Watched<Option<T>>`, so a file that appears after boot
+is picked up (and one that is removed becomes `None`); `Option<Watched<T>>` is a declaration error, and
+`reload = "watch"` on a field that is not `Watched<T>` is a compile error. Clones of a `Watched<T>` share the
+content, so hand one to each handler. Kubernetes never updates a file mounted with `subPath`: mount the
+directory.
 
 ## Cargo features
 
@@ -633,12 +678,12 @@ docuconf-go commit, and nightly against `main`.
 `tests/conformance_export.rs` declares the shared export fixture (`conformance/export/fixture.yaml`) with this
 SDK's attributes, exports it, and compares it with `conformance/export/golden.cue` using
 `docuconf conformance export` (the CLI on `PATH` or `$DOCUCONF_CLI`; `DOCUCONF_REQUIRE_EXPORT=1` makes a missing
-CLI a failure). The only accepted difference is `reload: watch` on two files, which this SDK does not support yet,
-so `tests/golden/gateway.cue` stays as well.
+CLI a failure). The export must match with no difference; `tests/golden/gateway.cue` stays as well.
 
 ## Not yet supported
 
-- `reload: "watch"`, for file inputs and overlays (rejected at declaration time; files are read once at boot).
+- `reload: "watch"` for overlays (`Reload::Watch` is rejected at declaration time; the overlay is read once at
+  boot). File inputs support it through `Watched<T>`.
 - JKS keystores (PKCS#12 only).
 - Falling back from a variable to its `replaced_by` successor; deprecated variables only warn when set.
 - Markdown docs generation (a SHOULD in the spec).

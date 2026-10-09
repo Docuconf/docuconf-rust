@@ -110,11 +110,12 @@ pub(crate) fn resolve_path(decl: &FileDecl, cx: &FileCx) -> PathBuf {
 }
 
 pub(crate) fn check(decl: &FileDecl, cx: &FileCx) -> Outcome {
-    let c = Ctx {
-        decl,
-        path: resolve_path(decl, cx),
-        cx,
-    };
+    check_at(decl, resolve_path(decl, cx), cx)
+}
+
+/// Checks a file input at an already resolved path.
+pub(crate) fn check_at(decl: &FileDecl, path: PathBuf, cx: &FileCx) -> Outcome {
+    let c = Ctx { decl, path, cx };
     let r = match &decl.kind {
         #[cfg(feature = "tls")]
         FileKind::Tls => crate::pki::tls(&c),
