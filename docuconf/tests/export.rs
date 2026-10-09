@@ -577,3 +577,90 @@ fn details_attribute_overrides_the_doc_comment() {
         res.unwrap_or_else(|e| panic!("cue vet failed:\n{e}\n{out}"));
     }
 }
+
+#[test]
+fn csv_lists_export_their_encoding() {
+    #[derive(Debug, Deserialize, Docuconf)]
+    #[allow(dead_code)]
+    struct Keys {
+        /// Keys that verify webhook signatures.
+        #[docuconf(
+            encoding = "csv",
+            min_items = 1,
+            max_items = 2,
+            item_min_length = 32,
+            item_max_length = 256
+        )]
+        webhook_keys: Option<Secret<Vec<String>>>,
+        /// Ports, separated by semicolons.
+        #[docuconf(encoding = "csv", separator = ";", default = [80, 443])]
+        ports: Vec<u16>,
+        /// Origins, as a JSON array.
+        #[docuconf(encoding = "json")]
+        origins: Option<Vec<String>>,
+    }
+    let out = docuconf::export::<Keys>(&Meta::new("keys")).unwrap();
+    let block = |name: &str| {
+        let start = out.find(&format!("\t\t{name}: {{")).unwrap();
+        let end = start + out[start..].find("\n\t\t}").unwrap();
+        out[start..end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let k = block("WEBHOOK_KEYS");
+    for want in [
+        "secret: true",
+        "encoding: \"csv\"",
+        "separator: \",\"",
+        "minItems: 1",
+        "maxItems: 2",
+        "itemMinLength: 32",
+        "itemMaxLength: 256",
+    ] {
+        assert!(k.contains(want), "missing {want:?} in {k}");
+    }
+    assert!(!k.contains("required: true"), "{k}");
+    assert!(
+        block("PORTS").contains("encoding: \"csv\" separator: \";\""),
+        "{out}"
+    );
+    assert!(block("ORIGINS").contains("encoding: \"json\""), "{out}");
+    if let Some(res) = cue_vet(&out) {
+        res.unwrap_or_else(|e| panic!("cue vet failed:\n{e}\n{out}"));
+    }
+}
+
+#[test]
+fn list_encoding_declaration_errors() {
+    #[derive(Debug, Deserialize, Docuconf)]
+    #[allow(dead_code)]
+    struct Bad {
+        /// Not a list encoding.
+        #[docuconf(encoding = "yaml")]
+        tags: Vec<String>,
+        /// A separator without csv.
+        #[docuconf(separator = ";")]
+        zones: Vec<String>,
+        /// An empty separator.
+        #[docuconf(encoding = "csv", separator = "")]
+        hosts: Vec<String>,
+        /// A default item that holds the separator.
+        #[docuconf(encoding = "csv", default = ["a,b"])]
+        names: Vec<String>,
+        /// An encoding on a plain string.
+        #[docuconf(encoding = "csv")]
+        label: String,
+    }
+    let err = docuconf::check_declaration::<Bad>().unwrap_err();
+    let all = err.problems.join("\n");
+    for want in [
+        "TAGS (Bad.tags): encoding \"yaml\" is not a list encoding; use \"json\" or \"csv\"",
+        "ZONES (Bad.zones): separator needs encoding = \"csv\"",
+        "HOSTS (Bad.hosts): separator must not be empty",
+        "NAMES (Bad.names): default has an item containing the separator \",\"",
+        "LABEL (Bad.label): attribute `encoding` does not apply to a string variable",
+    ] {
+        assert!(all.contains(want), "missing {want:?} in\n{all}");
+    }
+}

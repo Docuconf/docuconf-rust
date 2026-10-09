@@ -666,3 +666,49 @@ fn list_item_lengths_count_characters_after_splitting() {
         "{v}"
     );
 }
+
+/// A dual-key secret (SPEC §6.1): a csv list of one or two keys, each 32 to
+/// 256 characters, that never shows up in an error.
+#[test]
+fn a_csv_key_set() {
+    #[derive(Debug, Deserialize, Docuconf)]
+    struct Keys {
+        /// Keys that verify webhook signatures.
+        #[docuconf(
+            encoding = "csv",
+            min_items = 1,
+            max_items = 2,
+            item_min_length = 32,
+            item_max_length = 256
+        )]
+        webhook_keys: Option<docuconf::Secret<Vec<String>>>,
+    }
+    let old = "old-webhook-key-0123456789abcdef0123";
+    let new = "new-webhook-key-0123456789abcdef0123";
+    let load = |v: &str| {
+        docuconf::Loader::<Keys>::new()
+            .env([("WEBHOOK_KEYS", v)])
+            .termination_log(false)
+            .load()
+    };
+    let k = load(&format!("{old},{new}")).unwrap();
+    assert_eq!(
+        k.webhook_keys.unwrap().expose(),
+        &vec![old.to_string(), new.to_string()]
+    );
+    assert!(load("").unwrap().webhook_keys.is_none());
+    for (value, code) in [
+        (format!("{old},"), Code::OutOfRange),
+        (format!("{old},new-webhook-key"), Code::OutOfRange),
+        (format!("{old},{new},{old}"), Code::TooManyItems),
+    ] {
+        match load(&value) {
+            Err(Error::Validation(v)) => {
+                assert_eq!(v.codes_for("WEBHOOK_KEYS"), [code], "{value}");
+                let text = v.to_string();
+                assert!(!text.contains("webhook-key"), "a key leaked: {text}");
+            }
+            other => panic!("{value}: expected {code:?}, got {other:?}"),
+        }
+    }
+}

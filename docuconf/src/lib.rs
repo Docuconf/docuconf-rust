@@ -71,7 +71,7 @@
 //! | `std::time::Duration` with `#[serde(with = "docuconf::humantime_serde")]` | `duration`, encoding `go` |
 //! | `url::Url` | `url` (`max_length`) |
 //! | a `#[derive(DocuconfEnum)]` enum | `enum` |
-//! | `Vec<String>`, `Vec<int>` | `list`, encoding `json`, with an int item type's range as `itemMin`/`itemMax` (narrow it with `item_min`/`item_max`); string items take `item_min_length`/`item_max_length` |
+//! | `Vec<String>`, `Vec<int>` | `list`, encoding `json` (or `csv` with `encoding = "csv"` and an optional `separator`), with an int item type's range as `itemMin`/`itemMax` (narrow it with `item_min`/`item_max`); string items take `item_min_length`/`item_max_length` |
 //! | [`Json<T>`] | `json`, schema from `T: JsonSchema` (`max_length` on its wire string) |
 //! | [`Secret<T>`] | `T`, with `secret: true` |
 //! | `Option<T>` | `T`, optional |
@@ -116,7 +116,7 @@
 //! values, because figment's `Env` provider trims values and guesses types
 //! (it reads `8080` as a number even for a `String` field), which the spec
 //! forbids. Lists are JSON arrays (`["a","b"]`, which figment's `Env` also
-//! parses), durations use Go's syntax (`1m30s`, exactly what Go's
+//! parses) unless declared `encoding = "csv"` (`a,b`), durations use Go's syntax (`1m30s`, exactly what Go's
 //! `time.ParseDuration` accepts), and an empty value is unset for every
 //! type but `string`.
 

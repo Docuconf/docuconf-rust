@@ -214,6 +214,8 @@ struct DocAttrs {
     item_max: Option<(DLit, Span)>,
     item_min_length: Option<TokenStream2>,
     item_max_length: Option<TokenStream2>,
+    encoding: Option<String>,
+    separator: Option<String>,
     group: Option<String>,
     examples: Vec<String>,
     deprecated: Option<String>,
@@ -399,6 +401,8 @@ fn parse_doc_attrs(attrs: &[Attribute]) -> syn::Result<DocAttrs> {
                 "item_max" => a.item_max = Some(lit_attr(&meta)?),
                 "item_min_length" => a.item_min_length = Some(int_tokens(&meta)?),
                 "item_max_length" => a.item_max_length = Some(int_tokens(&meta)?),
+                "encoding" => a.encoding = Some(s(&meta)?),
+                "separator" => a.separator = Some(s(&meta)?),
                 "group" => a.group = Some(s(&meta)?),
                 "examples" => a.examples = str_list(&meta)?,
                 "deprecated" => a.deprecated = Some(s(&meta)?),
@@ -766,6 +770,8 @@ fn expand_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let item_max = opt_lit(&a.item_max);
         let item_min_length = opt_tokens(&a.item_min_length);
         let item_max_length = opt_tokens(&a.item_max_length);
+        let encoding = opt_str(&a.encoding);
+        let separator = opt_str(&a.separator);
         let group = opt_str(&a.group);
         let examples = &a.examples;
         let deprecated = opt_str(&a.deprecated);
@@ -822,6 +828,8 @@ fn expand_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     item_max: #item_max,
                     item_min_length: #item_min_length,
                     item_max_length: #item_max_length,
+                    encoding: #encoding,
+                    separator: #separator,
                     group: #group,
                     examples: &[#(#examples),*],
                     deprecated: #deprecated,

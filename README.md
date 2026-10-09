@@ -324,7 +324,7 @@ reading the environment and the declared files.
 | `Option<Duration>` + `#[serde(default, with = "docuconf::humantime_serde::option")]` | optional `duration` |
 | `url::Url` (`docuconf::url::Url`) | `url` (`schemes`, `max_length`) |
 | `#[derive(DocuconfEnum)]` enum | `enum`, values after serde renames |
-| `Vec<String>`, `Vec<u16>`... | `list`, encoding `json` (`min_items`, `max_items`); string items take `item_min_length`/`item_max_length`; an int item type narrower than 64 bits exports its range as `itemMin`/`itemMax` |
+| `Vec<String>`, `Vec<u16>`... | `list`, encoding `json`, or `csv` with `encoding = "csv"` (`separator`, `,` by default) (`min_items`, `max_items`); string items take `item_min_length`/`item_max_length`; an int item type narrower than 64 bits exports its range as `itemMin`/`itemMax` |
 | `docuconf::Json<T>` (`T: JsonSchema`) | `json`, with the schema from `T` (`max_length`) |
 | `docuconf::Secret<T>` | `T` with `secret: true`; `Debug` prints `Secret(***)`, `Serialize` writes `"***"` |
 | `secrecy::SecretString`, `secrecy::SecretBox<T>` (feature `secrecy`) | `string` / `T` with `secret: true`, zeroized on drop |
@@ -348,7 +348,7 @@ type``. Use `Json<HashMap<..>>` for a map, or `#[docuconf(skip)]` to load the fi
 
 Variable attributes: `default`, `required`, `secret`, `min`, `max`, `min_length`, `max_length`, `pattern` (RE2,
 matches anywhere: anchor with `^`/`$`), `values`, `schemes`, `min_items`, `max_items`, `item_min`, `item_max`,
-`item_min_length`, `item_max_length`, `group`, `examples`, `deprecated`, `replaced_by`, `config_key`, `env`,
+`item_min_length`, `item_max_length`, `encoding` (`"json"` or `"csv"`, for a list), `separator`, `group`, `examples`, `deprecated`, `replaced_by`, `config_key`, `env`,
 `description`, `details`, `skip`. File attributes: `path` (required), `name` (input name; default is the field name with
 `-`), `path_env`, `reload` (only `"restart"`; `"watch"` is not implemented yet and is rejected), `max_size`
 (`65536` or `"64Ki"`), `required`, `secret`, `description`, `details`, `group`, `deprecated`, plus the type-specific ones above. The struct
@@ -383,6 +383,21 @@ pub struct Reporting {
     /// Branch codes, two to four characters each.
     #[docuconf(item_min_length = 2, item_max_length = 4)]
     pub branches: Vec<String>,
+}
+```
+
+A list is a JSON array (`["a","b"]`) unless it says `encoding = "csv"`; then it is the items joined by `separator`
+(`a,b`), and a default item may not contain the separator. A secret list is a `Secret<Vec<String>>`: the contract
+marks it `secret: true`, and `Debug` and `Serialize` never show a key. Accepting either of two keys is how a key is
+rotated without downtime ([spec section 6.1](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md#61-rotation));
+the item lengths stop an empty or truncated key at boot:
+
+```rust
+#[derive(serde::Deserialize, docuconf::Docuconf)]
+pub struct Webhooks {
+    /// Keys that verify the signature on incoming payment webhooks.
+    #[docuconf(encoding = "csv", min_items = 1, max_items = 2, item_min_length = 32, item_max_length = 256)]
+    pub webhook_keys: Option<docuconf::Secret<Vec<String>>>,
 }
 ```
 

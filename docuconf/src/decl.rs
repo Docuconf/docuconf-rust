@@ -482,14 +482,21 @@ impl DeclCx {
             VarKind::Int { .. } | VarKind::Float | VarKind::Duration => &["min", "max"],
             VarKind::Url => &["schemes", "url", "max_length"],
             VarKind::Enum(_) => &["values"],
-            VarKind::List(ItemKind::Int { .. }) => {
-                &["min_items", "max_items", "item_min", "item_max"]
-            }
+            VarKind::List(ItemKind::Int { .. }) => &[
+                "min_items",
+                "max_items",
+                "item_min",
+                "item_max",
+                "encoding",
+                "separator",
+            ],
             VarKind::List(ItemKind::String) => &[
                 "min_items",
                 "max_items",
                 "item_min_length",
                 "item_max_length",
+                "encoding",
+                "separator",
             ],
             VarKind::Json { .. } => &["max_length"],
             VarKind::Bool => &[],
@@ -641,6 +648,29 @@ impl DeclCx {
             }
         }
 
+        // A list's wire encoding: json (figment's own list syntax) unless
+        // the field says csv.
+        let list_encoding = match (a.encoding, a.separator) {
+            (None | Some("json"), None) => ListEncoding::Json,
+            (Some("csv"), sep) => match sep.unwrap_or(",") {
+                "" => {
+                    problems.push("separator must not be empty".into());
+                    ListEncoding::Csv(",".into())
+                }
+                sep => ListEncoding::Csv(sep.to_string()),
+            },
+            (None | Some("json"), Some(_)) => {
+                problems.push("separator needs encoding = \"csv\"".into());
+                ListEncoding::Json
+            }
+            (Some(other), _) => {
+                problems.push(format!(
+                    "encoding {other:?} is not a list encoding; use \"json\" or \"csv\""
+                ));
+                ListEncoding::Json
+            }
+        };
+
         let pattern = match a.pattern {
             Some(p) => match compile_pattern(p) {
                 Ok(re) => Some((p.to_string(), re)),
@@ -687,7 +717,7 @@ impl DeclCx {
             item_max,
             item_min_length: a.item_min_length,
             item_max_length: a.item_max_length,
-            list_encoding: ListEncoding::Json,
+            list_encoding,
             duration_encoding: DurationEncoding::Go,
             group: a.group.map(str::to_string),
             examples: a.examples.iter().map(|s| s.to_string()).collect(),
@@ -700,6 +730,17 @@ impl DeclCx {
                 Ok(t) => {
                     for (_, msg) in value::check(&decl, &t) {
                         problems.push(format!("default {msg}"));
+                    }
+                    if let (ListEncoding::Csv(sep), Typed::List(items)) = (&decl.list_encoding, &t)
+                    {
+                        if items
+                            .iter()
+                            .any(|x| matches!(x, Typed::Str(s) if s.contains(sep.as_str())))
+                        {
+                            problems.push(format!(
+                                "default has an item containing the separator {sep:?}, which a csv list cannot carry"
+                            ));
+                        }
                     }
                     decl.default = Some(t);
                 }
