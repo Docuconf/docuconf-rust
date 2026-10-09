@@ -1,13 +1,14 @@
 //! Typed values: parsing the wire form (SPEC §5), reading values from
 //! figment layers, and checking constraints.
 
-use std::time::Duration;
+use std::sync::LazyLock;
 
 use figment::value::{Num, Value};
+use regex::Regex;
 
 use crate::__private::Lit;
 use crate::decl::{ItemKind, ListEncoding, VarDecl, VarKind};
-use crate::duration::{format_go, parse_duration, parse_encoded};
+use crate::duration::{format_signed, parse_duration, parse_encoded, parse_go};
 use crate::error::Code;
 
 /// A value of one of the contract types.
@@ -17,7 +18,8 @@ pub(crate) enum Typed {
     Int(i64),
     Float(f64),
     Bool(bool),
-    Dur(Duration),
+    /// A duration in nanoseconds; negative only in contract-first mode.
+    Dur(i128),
     List(Vec<Typed>),
     Json(serde_json::Value),
 }
@@ -30,7 +32,7 @@ impl Typed {
             Typed::Int(i) => i.to_string(),
             Typed::Float(f) => f.to_string(),
             Typed::Bool(b) => b.to_string(),
-            Typed::Dur(d) => format_go(*d),
+            Typed::Dur(d) => format_signed(*d),
             Typed::List(_) | Typed::Json(_) => {
                 serde_json::to_string(&self.to_json()).unwrap_or_default()
             }
@@ -45,7 +47,7 @@ impl Typed {
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
             Typed::Bool(b) => (*b).into(),
-            Typed::Dur(d) => format_go(*d).into(),
+            Typed::Dur(d) => format_signed(*d).into(),
             Typed::List(l) => l.iter().map(Typed::to_json).collect(),
             Typed::Json(j) => j.clone(),
         }
@@ -58,7 +60,7 @@ impl Typed {
             Typed::Int(i) => Value::from(*i),
             Typed::Float(f) => Value::from(*f),
             Typed::Bool(b) => Value::from(*b),
-            Typed::Dur(d) => Value::from(format_go(*d)),
+            Typed::Dur(d) => Value::from(format_signed(*d)),
             Typed::List(l) => Value::from(l.iter().map(Typed::to_figment).collect::<Vec<_>>()),
             Typed::Json(j) => Value::serialize(j).unwrap_or_else(|_| Value::from(j.to_string())),
         }
@@ -78,8 +80,9 @@ pub(crate) fn lit_value(kind: &VarKind, l: &Lit) -> Result<Typed, String> {
         (VarKind::Float, Lit::Float(f)) => Ok(Typed::Float(*f)),
         (VarKind::Bool, Lit::Bool(b)) => Ok(Typed::Bool(*b)),
         (VarKind::Duration, Lit::Str(s)) => parse_duration(s)
-            .map(Typed::Dur)
+            .map(|d| Typed::Dur(d.as_nanos() as i128))
             .map_err(|e| format!("{s:?} {e}")),
+        (VarKind::KeySet, _) => Err("a key set is secret, so it has no default".into()),
         (VarKind::List(item), Lit::List(items)) => items
             .iter()
             .map(|l| match (item, l) {
@@ -114,6 +117,7 @@ fn expected(kind: &VarKind) -> &'static str {
         VarKind::Bool => "true or false",
         VarKind::Duration => "a duration (write it as a string such as \"30s\")",
         VarKind::List(_) => "a list (write it as [\"a\", \"b\"])",
+        VarKind::KeySet => "a key set",
         VarKind::Json { .. } => "JSON (write it as a string such as r#\"{\"a\":1}\"#)",
     }
 }
@@ -141,10 +145,7 @@ pub(crate) fn parse_wire(var: &VarDecl, raw: &str) -> Result<Typed, ParseError> 
     match &var.kind {
         VarKind::String | VarKind::Url | VarKind::Enum(_) => Ok(Typed::Str(raw.to_string())),
         VarKind::Int { .. } => parse_int(raw).map(Typed::Int),
-        VarKind::Float => match raw.parse::<f64>() {
-            Ok(f) if f.is_finite() => Ok(Typed::Float(f)),
-            _ => Err(invalid("is not a finite number")),
-        },
+        VarKind::Float => parse_float(raw).map(Typed::Float),
         VarKind::Bool => {
             if raw.eq_ignore_ascii_case("true") {
                 Ok(Typed::Bool(true))
@@ -157,19 +158,22 @@ pub(crate) fn parse_wire(var: &VarDecl, raw: &str) -> Result<Typed, ParseError> 
         VarKind::Duration => parse_encoded(var.duration_encoding, raw)
             .map(Typed::Dur)
             .map_err(|e| (Code::InvalidType, e)),
-        VarKind::List(item) => match &var.list_encoding {
-            ListEncoding::Json => {
-                let arr: Vec<serde_json::Value> = serde_json::from_str(raw)
-                    .map_err(|_| invalid("is not a JSON array such as [\"a\",\"b\"]"))?;
-                arr.iter()
-                    .enumerate()
-                    .map(|(i, x)| json_item(*item, i, x))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(Typed::List)
+        VarKind::List(_) | VarKind::KeySet => {
+            let item = var.kind.item().expect("list-like");
+            match &var.list_encoding {
+                ListEncoding::Json => {
+                    let arr: Vec<serde_json::Value> = serde_json::from_str(raw)
+                        .map_err(|_| invalid("is not a JSON array such as [\"a\",\"b\"]"))?;
+                    arr.iter()
+                        .enumerate()
+                        .map(|(i, x)| json_item(item, i, x))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(Typed::List)
+                }
+                ListEncoding::Csv(sep) => parse_items(item, raw.split(sep.as_str())),
+                ListEncoding::Indexed => parse_items(item, [raw]),
             }
-            ListEncoding::Csv(sep) => parse_items(*item, raw.split(sep.as_str())),
-            ListEncoding::Indexed => parse_items(*item, [raw]),
-        },
+        }
         VarKind::Json { .. } => {
             let doc = serde_json::from_str(raw).map_err(|_| invalid("is not valid JSON"))?;
             // maxLength bounds the value as received, whitespace included,
@@ -206,8 +210,26 @@ pub(crate) fn parse_items<'a>(
         .map(Typed::List)
 }
 
-/// A base-10 integer: `invalid_type` when it is not an integer at all,
-/// `out_of_range` when it is one outside the 64-bit range (SPEC §5).
+/// The wire form of a float (SPEC §5): decimal digits on both sides of an
+/// optional point, an optional sign and an optional exponent. Rust's own
+/// `f64` parser also takes `inf`, `NaN`, `.5` and `5.`.
+static FLOAT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[+-]?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$").unwrap());
+
+/// A finite decimal float, whatever the process locale (SPEC §5).
+fn parse_float(raw: &str) -> Result<f64, ParseError> {
+    match raw.parse::<f64>() {
+        Ok(f) if f.is_finite() && FLOAT.is_match(raw) => Ok(f),
+        _ => Err((
+            Code::InvalidType,
+            "is not a finite decimal number".to_string(),
+        )),
+    }
+}
+
+/// A base-10 integer, `^[+-]?[0-9]+$` (Rust's own parser takes exactly
+/// that): `invalid_type` when it is not an integer at all, `out_of_range`
+/// when it is one outside the 64-bit range (SPEC §5).
 fn parse_int(raw: &str) -> Result<i64, ParseError> {
     raw.parse::<i64>().map_err(|_| {
         let digits = raw.strip_prefix(['-', '+']).unwrap_or(raw);
@@ -284,7 +306,15 @@ pub(crate) fn from_figment(kind: &VarKind, v: &Value) -> Result<Typed, String> {
             _ => Err(wrong()),
         },
         (VarKind::Bool, Value::Bool(_, b)) => Ok(Typed::Bool(*b)),
-        (VarKind::Duration, Value::String(_, s)) => parse_duration(s).map(Typed::Dur),
+        (VarKind::Duration, Value::String(_, s)) => parse_go(s).map(Typed::Dur),
+        (VarKind::KeySet, Value::Array(_, items)) => items
+            .iter()
+            .map(|x| match x {
+                Value::String(_, s) => Ok(Typed::Str(s.clone())),
+                _ => Err(wrong()),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Typed::List),
         (VarKind::List(item), Value::Array(_, items)) => items
             .iter()
             .map(|x| match (item, x) {
@@ -371,15 +401,63 @@ pub(crate) fn check_value(var: &VarDecl, t: &Typed, from_wire: bool) -> Vec<(Cod
             }
         }
         (VarKind::Duration, Typed::Dur(d)) => {
-            if let Some(Typed::Dur(lo)) = var.min {
-                if *d < lo {
-                    push(Code::OutOfRange, format!("is below min {}", format_go(lo)));
+            if *d < 0 && !var.negative_ok {
+                push(
+                    Code::OutOfRange,
+                    "is negative, which a std::time::Duration field cannot hold".into(),
+                );
+            } else {
+                if let Some(Typed::Dur(lo)) = var.min {
+                    if *d < lo {
+                        push(
+                            Code::OutOfRange,
+                            format!("is below min {}", format_signed(lo)),
+                        );
+                    }
+                }
+                if let Some(Typed::Dur(hi)) = var.max {
+                    if *d > hi {
+                        push(
+                            Code::OutOfRange,
+                            format!("is above max {}", format_signed(hi)),
+                        );
+                    }
                 }
             }
-            if let Some(Typed::Dur(hi)) = var.max {
-                if *d > hi {
-                    push(Code::OutOfRange, format!("is above max {}", format_go(hi)));
+        }
+        (VarKind::KeySet, Typed::List(keys)) => {
+            // Each key's length first, an empty key whatever the bounds (a
+            // stray separator), then their number. One violation per
+            // variable, and never a key: a key set is secret.
+            let lo = var.item_min_length.unwrap_or(1).max(1);
+            let hi = var.item_max_length.unwrap_or(u64::MAX);
+            let bad = keys.iter().enumerate().find_map(|(i, k)| match k {
+                Typed::Str(s) => {
+                    let n = s.chars().count() as u64;
+                    (n < lo || n > hi).then_some((i, n))
                 }
+                _ => Some((i, 0)),
+            });
+            let n = keys.len() as u64;
+            if let Some((i, len)) = bad {
+                let m = if len == 0 {
+                    format!("has an empty key at position {i}")
+                } else if len < lo {
+                    format!("has key {i} of {len} characters, below keyMinLength {lo}")
+                } else {
+                    format!("has key {i} of {len} characters, above keyMaxLength {hi}")
+                };
+                push(Code::OutOfRange, m);
+            } else if let Some(lo) = var.min_items.filter(|lo| n < *lo) {
+                push(
+                    Code::TooFewItems,
+                    format!("has {n} keys, below minKeys {lo}"),
+                );
+            } else if let Some(hi) = var.max_items.filter(|hi| n > *hi) {
+                push(
+                    Code::TooManyItems,
+                    format!("has {n} keys, above maxKeys {hi}"),
+                );
             }
         }
         (VarKind::Url, Typed::Str(s)) => match url_scheme(s) {

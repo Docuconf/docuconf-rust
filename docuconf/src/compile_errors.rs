@@ -177,3 +177,40 @@
 //!     port: u16,
 //! }
 //! ```
+//!
+//! A blank deprecation message (`deprecated must say what to use instead,
+//! or why the input is going away`); one over 500 characters fails the
+//! same way:
+//!
+//! ```compile_fail
+//! #[derive(serde::Deserialize, docuconf::Docuconf)]
+//! struct Config {
+//!     /// Port the service used to listen on.
+//!     #[docuconf(deprecated = " ")]
+//!     old_port: Option<u16>,
+//! }
+//! ```
+//!
+//! A deprecated input marked `required` (`a required input cannot be
+//! deprecated`); a field that is required because it is neither an
+//! `Option` nor defaulted is a declaration error at boot instead:
+//!
+//! ```compile_fail
+//! #[derive(serde::Deserialize, docuconf::Docuconf)]
+//! struct Config {
+//!     /// Port the service used to listen on.
+//!     #[docuconf(required, deprecated = "Use PORT instead")]
+//!     old_port: Option<u16>,
+//! }
+//! ```
+//!
+//! A default on a key set, which is always secret:
+//!
+//! ```compile_fail,E0080
+//! #[derive(serde::Deserialize, docuconf::Docuconf)]
+//! struct Config {
+//!     /// Keys that verify webhook signatures.
+//!     #[docuconf(default = "a,b")]
+//!     keys: docuconf::KeySet,
+//! }
+//! ```

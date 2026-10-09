@@ -5,6 +5,11 @@
 //! `../docuconf-go/conformance/cases.json` next to this repository. The
 //! suite is skipped when the file is missing, unless
 //! `DOCUCONF_REQUIRE_CONFORMANCE=1`.
+//!
+//! Every case runs: the test fails if any is skipped. The one exception is
+//! a build without the `tls` or `keystore` cargo feature, which cannot
+//! load TLS key pairs, CA bundles or keystores; it skips the cases whose
+//! contract declares one, and says so.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -12,9 +17,51 @@ use std::path::PathBuf;
 use docuconf::Contract;
 use serde_json::Value as Json;
 
-/// Capability tags this SDK supports (conformance/README.md). Cases that
-/// require any other tag are skipped.
-const SUPPORTED: &[&str] = &["int64", "json-schema"];
+/// Capability tags this SDK supports (conformance/README.md): an
+/// allow-list, so a case with a tag this runner does not know is skipped,
+/// never run (SPEC §12).
+const SUPPORTED: &[&str] = &[
+    "int64",
+    "json-schema",
+    "key-set",
+    "deprecated",
+    "strict-parsing",
+    "files",
+    "profiles",
+    "overlays",
+];
+
+/// File types this build cannot load, by the cargo feature they need.
+fn unbuilt_file_types() -> Vec<(&'static str, &'static str)> {
+    let mut out = Vec::new();
+    if !cfg!(feature = "tls") {
+        out.extend([("tls", "tls"), ("caBundle", "tls")]);
+    }
+    if !cfg!(feature = "keystore") {
+        out.push(("keystore", "keystore"));
+    }
+    out
+}
+
+/// Writes the case's files under a fresh directory.
+fn write_files(case: &Json, root: &std::path::Path) -> Result<(), String> {
+    use base64::Engine as _;
+    for (path, f) in case["files"].as_object().into_iter().flatten() {
+        let data = if let Some(t) = f["text"].as_str() {
+            t.as_bytes().to_vec()
+        } else if let Some(b) = f["base64"].as_str() {
+            base64::engine::general_purpose::STANDARD
+                .decode(b)
+                .map_err(|e| format!("file {path}: {e}"))?
+        } else {
+            return Err(format!("file {path} has neither text nor base64"));
+        };
+        let full = root.join(path.trim_start_matches('/'));
+        std::fs::create_dir_all(full.parent().unwrap()).map_err(|e| e.to_string())?;
+        std::fs::write(&full, data).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 
 fn cases_path() -> PathBuf {
     match std::env::var_os("DOCUCONF_CONFORMANCE") {
@@ -55,7 +102,16 @@ fn run(case: &Json) -> Result<(), String> {
         .flatten()
         .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
         .collect();
-    let result = contract.load_env(env.clone());
+    // Files go under a fresh DOCUCONF_FILE_ROOT, set for every case, so no
+    // case reads the machine's own files.
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    write_files(case, dir.path())?;
+    let mut full_env = env.clone();
+    full_env.push((
+        "DOCUCONF_FILE_ROOT".to_string(),
+        dir.path().to_string_lossy().into_owned(),
+    ));
+    let result = contract.load_env(full_env);
 
     if let Some(expect) = case.get("expect").and_then(Json::as_object) {
         let values = result.map_err(|e| format!("expected values, got {e}"))?;
@@ -138,7 +194,8 @@ fn conformance_suite() {
     assert_eq!(doc["version"], 1, "unsupported cases.json version");
     let cases = doc["cases"].as_array().expect("cases.json has no cases");
 
-    let (mut passed, mut skipped, mut failures) = (0, 0, Vec::new());
+    let unbuilt = unbuilt_file_types();
+    let (mut passed, mut skipped, mut feature_skipped, mut failures) = (0, 0, 0, Vec::new());
     for case in cases {
         let id = case["id"].as_str().unwrap_or("<no id>");
         let missing: Vec<&str> = case["requires"]
@@ -153,15 +210,32 @@ fn conformance_suite() {
             eprintln!("skip {id}: requires {}", missing.join(", "));
             continue;
         }
+        let needs: Vec<&str> = case["contract"]["files"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(_, f)| {
+                let t = f["type"].as_str()?;
+                unbuilt
+                    .iter()
+                    .find(|(ty, _)| *ty == t)
+                    .map(|(_, feat)| *feat)
+            })
+            .collect();
+        if let Some(feature) = needs.first() {
+            feature_skipped += 1;
+            eprintln!("skip {id}: this build has no `{feature}` cargo feature");
+            continue;
+        }
         match run(case) {
             Ok(()) => passed += 1,
             Err(why) => failures.push(format!("{id}: {why}")),
         }
     }
     eprintln!(
-        "conformance: {passed} passed, {skipped} skipped, {} failed ({} cases)",
+        "conformance: {} cases, {passed} passed, {} failed, {skipped} skipped, {feature_skipped} skipped for a disabled cargo feature",
+        cases.len(),
         failures.len(),
-        cases.len()
     );
     assert!(
         failures.is_empty(),
@@ -169,4 +243,11 @@ fn conformance_suite() {
         failures.len(),
         failures.join("\n  ")
     );
+    assert_eq!(
+        skipped, 0,
+        "this SDK must run every case, but skipped {skipped} (see the skip lines above)"
+    );
+    if unbuilt.is_empty() {
+        assert_eq!(feature_skipped, 0);
+    }
 }

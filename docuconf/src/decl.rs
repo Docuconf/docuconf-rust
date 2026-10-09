@@ -29,6 +29,8 @@ pub enum VarKind {
     Url,
     Enum(Vec<String>),
     List(ItemKind),
+    /// A `keySet`: secret keys that are all valid at once (SPEC §4.3).
+    KeySet,
     Json {
         schema: serde_json::Value,
         bind: BindFn,
@@ -112,7 +114,24 @@ impl VarKind {
             VarKind::Url => "url",
             VarKind::Enum(_) => "enum",
             VarKind::List(_) => "list",
+            VarKind::KeySet => "keySet",
             VarKind::Json { .. } => "json",
+        }
+    }
+
+    /// Whether the value is a list of items on the wire: a `list` or a
+    /// `keySet`, which share the list encodings (SPEC §5).
+    pub(crate) fn is_listlike(&self) -> bool {
+        matches!(self, VarKind::List(_) | VarKind::KeySet)
+    }
+
+    /// The item type of a list-like variable: a key set's keys are
+    /// strings.
+    pub(crate) fn item(&self) -> Option<ItemKind> {
+        match self {
+            VarKind::List(i) => Some(*i),
+            VarKind::KeySet => Some(ItemKind::String),
+            _ => None,
         }
     }
 }
@@ -149,6 +168,8 @@ pub(crate) struct VarDecl {
     pub max_length: Option<u64>,
     pub pattern: Option<(String, Regex)>,
     pub schemes: Vec<String>,
+    /// The number of items of a `list`, or of keys of a `keySet` (its
+    /// `minKeys` and `maxKeys`, always set: 1 and 2 by default).
     pub min_items: Option<u64>,
     pub max_items: Option<u64>,
     /// Bounds on each item of an `int` list: the user's `item_min` /
@@ -156,7 +177,8 @@ pub(crate) struct VarDecl {
     /// 64-bit limit.
     pub item_min: Option<i64>,
     pub item_max: Option<i64>,
-    /// Bounds on the length of each item of a `string` list, in characters
+    /// Bounds on the length of each item of a `string` list, or of each
+    /// key of a `keySet` (`keyMinLength`, `keyMaxLength`), in characters
     /// (Unicode code points).
     pub item_min_length: Option<u64>,
     pub item_max_length: Option<u64>,
@@ -166,6 +188,10 @@ pub(crate) struct VarDecl {
     /// The wire encoding of a duration: `go` (humantime) for figment-bound
     /// structs, as the contract says in contract-first mode.
     pub duration_encoding: DurationEncoding,
+    /// Whether a negative duration is a value: true in contract-first
+    /// mode, false for a `std::time::Duration` field, which cannot hold
+    /// one (it is `out_of_range`).
+    pub negative_ok: bool,
     pub group: Option<String>,
     pub examples: Vec<String>,
     pub deprecated: Option<String>,
@@ -333,6 +359,58 @@ pub(crate) fn check_details(details: Option<&str>) -> Option<String> {
     })
 }
 
+/// The most characters a deprecation message may have (SPEC §4.2).
+pub(crate) const MAX_DEPRECATION: usize = 500;
+
+/// Checks a `deprecated` message (SPEC §4.2): it says what to use instead,
+/// or why the input is going away, so it is not blank, and it has at most
+/// [`MAX_DEPRECATION`] characters.
+pub(crate) fn check_deprecated(msg: &str) -> Option<String> {
+    if msg.trim().is_empty() {
+        return Some(
+            "deprecated must say what to use instead, or why the input is going away; it must not be blank"
+                .into(),
+        );
+    }
+    let n = msg.chars().count();
+    (n > MAX_DEPRECATION).then(|| {
+        format!("the deprecated message is {n} characters; it may have at most {MAX_DEPRECATION}")
+    })
+}
+
+/// Fills in a key set's default bounds (one to two keys) and checks them
+/// (SPEC §4.3). Returns the key count bounds.
+pub(crate) fn key_set_bounds(
+    min_keys: Option<u64>,
+    max_keys: Option<u64>,
+    key_min_length: Option<u64>,
+    key_max_length: Option<u64>,
+    problems: &mut Vec<String>,
+    names: [&str; 4],
+) -> (u64, u64) {
+    let lo = min_keys.unwrap_or(1);
+    let hi = max_keys.unwrap_or(lo.max(2));
+    if lo < 1 {
+        problems.push(format!("{} must be at least 1", names[0]));
+    }
+    if hi < lo {
+        problems.push(format!("{} {hi} is below {} {lo}", names[1], names[0]));
+    }
+    for (name, n) in [(names[2], key_min_length), (names[3], key_max_length)] {
+        if n == Some(0) {
+            problems.push(format!(
+                "{name} must be at least 1: an empty key is never valid"
+            ));
+        }
+    }
+    if let (Some(a), Some(b)) = (key_min_length, key_max_length) {
+        if b < a {
+            problems.push(format!("{} {b} is below {} {a}", names[3], names[2]));
+        }
+    }
+    (lo, hi)
+}
+
 pub(crate) fn is_env_name(s: &str) -> bool {
     let mut c = s.chars();
     matches!(c.next(), Some('A'..='Z'))
@@ -498,6 +576,14 @@ impl DeclCx {
                 "encoding",
                 "separator",
             ],
+            VarKind::KeySet => &[
+                "min_keys",
+                "max_keys",
+                "key_min_length",
+                "key_max_length",
+                "encoding",
+                "separator",
+            ],
             VarKind::Json { .. } => &["max_length"],
             VarKind::Bool => &[],
         };
@@ -543,7 +629,8 @@ impl DeclCx {
             );
         }
 
-        let secret = a.secret || wrapped_secret;
+        // A key set is always secret (SPEC §4.3).
+        let secret = a.secret || wrapped_secret || matches!(kind, VarKind::KeySet);
         let has_default = a.default.is_some();
         if a.required && has_default {
             problems.push("a required variable must not have a default".into());
@@ -561,6 +648,15 @@ impl DeclCx {
             );
         }
         let required = a.required || (!optional && !has_default);
+        if let Some(msg) = a.deprecated {
+            if required {
+                problems.push(
+                    "a required variable cannot be deprecated: deprecating it asks the platform to stop setting it; make the field an Option or give it a default"
+                        .into(),
+                );
+            }
+            problems.extend(check_deprecated(msg));
+        }
 
         // Constraints, with integer bounds narrowed to the Rust type.
         let mut min = None;
@@ -648,9 +744,31 @@ impl DeclCx {
             }
         }
 
+        // A key set's bounds: one to two keys by default.
+        let (mut min_items, mut max_items) = (a.min_items, a.max_items);
+        let (mut item_min_length, mut item_max_length) = (a.item_min_length, a.item_max_length);
+        if matches!(kind, VarKind::KeySet) {
+            let (lo, hi) = key_set_bounds(
+                a.min_keys,
+                a.max_keys,
+                a.key_min_length,
+                a.key_max_length,
+                &mut problems,
+                ["min_keys", "max_keys", "key_min_length", "key_max_length"],
+            );
+            (min_items, max_items) = (Some(lo), Some(hi));
+            (item_min_length, item_max_length) = (a.key_min_length, a.key_max_length);
+        }
+
         // A list's wire encoding: json (figment's own list syntax) unless
-        // the field says csv.
-        let list_encoding = match (a.encoding, a.separator) {
+        // the field says csv. A key set's is csv unless it says json: the
+        // platform supplies one Secret key holding `old,new`.
+        let default_encoding = if matches!(kind, VarKind::KeySet) {
+            Some("csv")
+        } else {
+            None
+        };
+        let list_encoding = match (a.encoding.or(default_encoding), a.separator) {
             (None | Some("json"), None) => ListEncoding::Json,
             (Some("csv"), sep) => match sep.unwrap_or(",") {
                 "" => {
@@ -711,14 +829,15 @@ impl DeclCx {
             max_length: a.max_length,
             pattern,
             schemes: a.schemes.iter().map(|s| s.to_string()).collect(),
-            min_items: a.min_items,
-            max_items: a.max_items,
+            min_items,
+            max_items,
             item_min,
             item_max,
-            item_min_length: a.item_min_length,
-            item_max_length: a.item_max_length,
+            item_min_length,
+            item_max_length,
             list_encoding,
             duration_encoding: DurationEncoding::Go,
+            negative_ok: false,
             group: a.group.map(str::to_string),
             examples: a.examples.iter().map(|s| s.to_string()).collect(),
             deprecated: a.deprecated.map(str::to_string),
@@ -905,6 +1024,24 @@ impl DeclCx {
             }
         }
 
+        let required = a.required || !optional;
+        if let Some(msg) = a.deprecated {
+            if required {
+                problems.push(
+                    "a required file input cannot be deprecated: deprecating it asks the platform to stop supplying it; make the field an Option"
+                        .into(),
+                );
+            }
+            problems.extend(check_deprecated(msg));
+        }
+        if let Some(r) = a.replaced_by {
+            if a.deprecated.is_none() {
+                problems.push("replaced_by needs deprecated = \"message\"".into());
+            }
+            if !is_input_name(r) {
+                problems.push(format!("replaced_by {r:?} is not a file input name"));
+            }
+        }
         let secret =
             a.secret || wrapped_secret || matches!(kind, FileKind::Tls | FileKind::Keystore);
         let decl = FileDecl {
@@ -919,7 +1056,7 @@ impl DeclCx {
             kind,
             description,
             details: a.details.map(str::to_string),
-            required: a.required || !optional,
+            required,
             secret,
             path,
             path_env: a.path_env.map(str::to_string),

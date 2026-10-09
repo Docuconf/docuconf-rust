@@ -318,13 +318,14 @@ reading the environment and the declared files.
 |---|---|
 | `String` | `string` (`min_length`, `max_length`, `pattern`); `url` with `schemes(...)` or `url` (`max_length`); `enum` with `values(...)` |
 | `i8`..`i64`, `u8`..`u64`, `isize`, `usize` | `int`, with the type's range as `min`/`max` |
-| `f32`, `f64` | `float` (NaN and infinity rejected) |
-| `bool` | `bool` (`true`/`false`, any case) |
+| `f32`, `f64` | `float` (decimal only; NaN and infinity rejected) |
+| `bool` | `bool` (`true`/`false`, any case, nothing else) |
 | `std::time::Duration` + `#[serde(with = "docuconf::humantime_serde")]` | `duration`, encoding `go` |
 | `Option<Duration>` + `#[serde(default, with = "docuconf::humantime_serde::option")]` | optional `duration` |
 | `url::Url` (`docuconf::url::Url`) | `url` (`schemes`, `max_length`) |
 | `#[derive(DocuconfEnum)]` enum | `enum`, values after serde renames |
 | `Vec<String>`, `Vec<u16>`... | `list`, encoding `json`, or `csv` with `encoding = "csv"` (`separator`, `,` by default) (`min_items`, `max_items`); string items take `item_min_length`/`item_max_length`; an int item type narrower than 64 bits exports its range as `itemMin`/`itemMax` |
+| `docuconf::KeySet` | `keySet`, always secret: encoding `csv` (or `json` with `encoding = "json"`, `separator`), `min_keys` (default 1), `max_keys` (default 2), `key_min_length`, `key_max_length` |
 | `docuconf::Json<T>` (`T: JsonSchema`) | `json`, with the schema from `T` (`max_length`) |
 | `docuconf::Secret<T>` | `T` with `secret: true`; `Debug` prints `Secret(***)`, `Serialize` writes `"***"` |
 | `secrecy::SecretString`, `secrecy::SecretBox<T>` (feature `secrecy`) | `string` / `T` with `secret: true`, zeroized on drop |
@@ -415,6 +416,36 @@ The serde key is upper-cased as it is, with no `_` inserted: under `#[serde(rena
 `request_timeout` is the key `requestTimeout` and the variable `REQUESTTIMEOUT`. Give such fields
 `#[docuconf(env = "REQUEST_TIMEOUT")]`; at boot, a set `REQUEST_TIMEOUT` gets a "did you mean" warning.
 
+## Key sets
+
+A `KeySet` holds the keys that are all valid at once on the side that verifies (webhook signatures, inbound
+API keys), so a key can be rotated without an outage (spec §4.3, §6.1). The platform supplies it as one Secret
+key holding `old,new` during a rotation; keys are never trimmed, and an empty key (a stray comma) is always
+`out_of_range`. Like `Secret`, it prints and serializes as `***`, and errors never show a key.
+
+```rust
+use docuconf::{Docuconf, KeySet};
+use serde::Deserialize;
+
+#[derive(Deserialize, Docuconf)]
+struct Config {
+    /// Keys that verify the signature on incoming webhooks.
+    #[docuconf(key_min_length = 32, key_max_length = 256)]
+    webhook_keys: KeySet,
+}
+
+fn accept(config: &Config, presented_key: &str, body: &[u8], signature: &[u8]) -> bool {
+    // An API key a caller presents: compared with every key in constant time.
+    let _ = config.webhook_keys.contains(presented_key);
+    // An HMAC: tries every key, even after a match. Compare in constant time
+    // inside the closure (hmac's `verify_slice` does).
+    config.webhook_keys.verify(|key| [key, body].concat() == signature)
+}
+```
+
+The generated docs print the three rotation steps for every key set, so a field's doc comment need not repeat
+them.
+
 ## Wire formats
 
 docuconf reads the declared variables itself and hands figment typed values. figment's own `Env` provider trims
@@ -423,6 +454,13 @@ it alongside docuconf. Values are never trimmed; an empty value is unset for eve
 are JSON arrays (`["a","b"]`, which figment's `Env` also reads), so the contract says `encoding: "json"`;
 durations use Go's syntax, exactly what Go's `time.ParseDuration` accepts (`1m30s`, `1.5h`, `250ms`; not `2d`
 or `1 hour`, which the platform's `docuconf vet` would reject), so the contract says `encoding: "go"`.
+
+Parsing is strict, with one exact rule per type (spec §5), whatever Rust's own parsers would take: a `bool` is
+`true` or `false` in any case, never `1`, `t` or `yes`; an `int` is `^[+-]?[0-9]+$` in base 10 (`007` is 7; never
+`0x10`, `1_000` or `1e3`), and a value outside the field's type is `out_of_range`; a `float` is
+`^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$` (never `inf`, `NaN`, `.5`, `5.` or a hex float); a `go` duration takes
+a sign, but a negative one is `out_of_range` for a `std::time::Duration` field. Nothing is trimmed, including
+`csv` items: `a, b` is `a` and ` b`. Anything else is `invalid_type`.
 
 ## File inputs
 
@@ -567,7 +605,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `load()` reports every violation together and writes them to the termination log, as `Loader::load` does;
 `load_env(...)` takes the whole environment as a map and writes nothing. `json` variables are checked against
-their `schema`. Profiles in the contract apply; file inputs and overlays are not loaded in this mode.
+their `schema`. The whole contract is loaded: variables are layered from their default, then the selected
+profile's default, then a config-file overlay (read under `DOCUCONF_FILE_ROOT`, its native values converted to
+their wire form), then the environment; every file input (`config` in JSON, YAML or TOML, `tls`, `caBundle`,
+`keystore`, `text`, `binary`) is read and checked as at boot, and returned by `Values::file`. A `go` duration may
+be negative here (`Value::NegativeDuration`), and a key set is a `Value::KeySet`.
 
 ## Conformance
 
@@ -580,9 +622,19 @@ DOCUCONF_CONFORMANCE=../docuconf-go/conformance/cases.json DOCUCONF_REQUIRE_CONF
   cargo test --test conformance -- --nocapture
 ```
 
-Failures are reported by case id. The SDK supports both capability tags, `int64` (Rust holds every 64-bit
-integer) and `json-schema` (`json` values are checked with the `jsonschema` crate), so no case is skipped. CI runs
-the suite against docuconf-go `main`.
+Failures are reported by case id. The runner keeps an allow-list of the capability tags the SDK supports, and
+skips (never runs) a case with a tag it does not know. The SDK supports every tag: `int64` (Rust holds every
+64-bit integer), `json-schema` (`json` values are checked with the `jsonschema` crate), and the transitional
+`key-set`, `deprecated`, `strict-parsing`, `files`, `profiles` and `overlays`. **No case is skipped**, and the
+test fails if one is. (A build without the `tls` or `keystore` cargo feature cannot load TLS key pairs, CA
+bundles or keystores, and skips just the cases that declare one.) CI runs the suite against the pinned
+docuconf-go commit, and nightly against `main`.
+
+`tests/conformance_export.rs` declares the shared export fixture (`conformance/export/fixture.yaml`) with this
+SDK's attributes, exports it, and compares it with `conformance/export/golden.cue` using
+`docuconf conformance export` (the CLI on `PATH` or `$DOCUCONF_CLI`; `DOCUCONF_REQUIRE_EXPORT=1` makes a missing
+CLI a failure). The only accepted difference is `reload: watch` on two files, which this SDK does not support yet,
+so `tests/golden/gateway.cue` stays as well.
 
 ## Not yet supported
 

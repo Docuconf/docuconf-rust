@@ -139,9 +139,7 @@ pub(crate) fn read(var: &VarDecl, env: &Env) -> Result<Option<Typed>, Violation>
         )
     };
     // The raw strings: one, or one per item of an indexed list.
-    let raws: Vec<&str> = if matches!(var.kind, VarKind::List(_))
-        && var.list_encoding == ListEncoding::Indexed
-    {
+    let raws: Vec<&str> = if var.kind.is_listlike() && var.list_encoding == ListEncoding::Indexed {
         let (count, gap) = env.indexed_items(&var.name);
         if let Some(missing) = gap {
             return Err(violation(
@@ -190,8 +188,8 @@ pub(crate) fn read(var: &VarDecl, env: &Env) -> Result<Option<Typed>, Violation>
         }
     }
     let parsed = match (&var.kind, raws.as_slice()) {
-        (VarKind::List(item), _) if var.list_encoding == ListEncoding::Indexed => {
-            value::parse_items(*item, raws.iter().copied())
+        (k, _) if k.is_listlike() && var.list_encoding == ListEncoding::Indexed => {
+            value::parse_items(k.item().expect("list-like"), raws.iter().copied())
         }
         (_, [raw]) => value::parse_wire(var, raw),
         _ => unreachable!("only an indexed list has several raw values"),
@@ -238,7 +236,9 @@ pub(crate) fn missing(var: &VarDecl) -> Violation {
 pub(crate) fn deprecation(var: &VarDecl, env: &Env) -> Option<String> {
     let msg = var.deprecated.as_ref()?;
     let set = env.vars.get(&var.name).is_some_and(|v| !v.is_empty())
-        || (var.list_encoding == ListEncoding::Indexed && env.indexed_items(&var.name).0 > 0);
+        || (var.kind.is_listlike()
+            && var.list_encoding == ListEncoding::Indexed
+            && env.indexed_items(&var.name).0 > 0);
     if !set {
         return None;
     }

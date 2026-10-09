@@ -214,6 +214,10 @@ struct DocAttrs {
     item_max: Option<(DLit, Span)>,
     item_min_length: Option<TokenStream2>,
     item_max_length: Option<TokenStream2>,
+    min_keys: Option<TokenStream2>,
+    max_keys: Option<TokenStream2>,
+    key_min_length: Option<TokenStream2>,
+    key_max_length: Option<TokenStream2>,
     encoding: Option<String>,
     separator: Option<String>,
     group: Option<String>,
@@ -401,6 +405,10 @@ fn parse_doc_attrs(attrs: &[Attribute]) -> syn::Result<DocAttrs> {
                 "item_max" => a.item_max = Some(lit_attr(&meta)?),
                 "item_min_length" => a.item_min_length = Some(int_tokens(&meta)?),
                 "item_max_length" => a.item_max_length = Some(int_tokens(&meta)?),
+                "min_keys" => a.min_keys = Some(int_tokens(&meta)?),
+                "max_keys" => a.max_keys = Some(int_tokens(&meta)?),
+                "key_min_length" => a.key_min_length = Some(int_tokens(&meta)?),
+                "key_max_length" => a.key_max_length = Some(int_tokens(&meta)?),
                 "encoding" => a.encoding = Some(s(&meta)?),
                 "separator" => a.separator = Some(s(&meta)?),
                 "group" => a.group = Some(s(&meta)?),
@@ -545,6 +553,24 @@ fn field_checks(
                     ),
                 );
             }
+        }
+    }
+    // Deprecation (SPEC §4.2): a message that says what to use instead, at
+    // most 500 characters, and never on a required input.
+    if let Some(msg) = &a.deprecated {
+        if msg.trim().is_empty() {
+            err(span, "`deprecated` must say what to use instead, or why the input is going away; it must not be blank".into());
+        } else if msg.chars().count() > 500 {
+            err(
+                span,
+                format!(
+                    "the `deprecated` message is {} characters; it may have at most 500",
+                    msg.chars().count()
+                ),
+            );
+        }
+        if a.required {
+            err(span, "a required input cannot be deprecated: deprecating it asks the platform to stop setting it; remove `required`".into());
         }
     }
     if let (Some((lo, lspan)), Some((hi, _))) = (&a.min, &a.max) {
@@ -770,6 +796,10 @@ fn expand_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let item_max = opt_lit(&a.item_max);
         let item_min_length = opt_tokens(&a.item_min_length);
         let item_max_length = opt_tokens(&a.item_max_length);
+        let min_keys = opt_tokens(&a.min_keys);
+        let max_keys = opt_tokens(&a.max_keys);
+        let key_min_length = opt_tokens(&a.key_min_length);
+        let key_max_length = opt_tokens(&a.key_max_length);
         let encoding = opt_str(&a.encoding);
         let separator = opt_str(&a.separator);
         let group = opt_str(&a.group);
@@ -828,6 +858,10 @@ fn expand_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     item_max: #item_max,
                     item_min_length: #item_min_length,
                     item_max_length: #item_max_length,
+                    min_keys: #min_keys,
+                    max_keys: #max_keys,
+                    key_min_length: #key_min_length,
+                    key_max_length: #key_max_length,
                     encoding: #encoding,
                     separator: #separator,
                     group: #group,

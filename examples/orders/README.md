@@ -22,7 +22,7 @@ declared with docuconf. It shows the three things the Rust SDK gives an app:
 | `ALLOWED_ORIGINS` | list of strings, a JSON array | at least 1 item; default `["http://localhost:3000"]` |
 | `REQUEST_TIMEOUT` | duration, Go syntax | `1s`–`5m`, default `30s` |
 | `WORKER_COUNT` | int | 1–64, default `4` |
-| `WEBHOOK_KEYS` | list of strings, comma-separated | secret, optional; 1–2 keys of 32–256 characters each |
+| `WEBHOOK_KEYS` | key set, comma-separated | secret, optional; 1–2 keys of 32–256 characters each |
 
 The example is a member of this repository's Cargo workspace and depends on
 the SDK by path, so it always builds against the code next to it.
@@ -63,28 +63,32 @@ runs it on every push.
 
 `WEBHOOK_KEYS` is a key set: `POST /webhooks/payments` accepts a body
 whose `X-Signature` header is the hex HMAC-SHA256 of the body under any
-key in the list ([`src/webhook.rs`](src/webhook.rs)). A variable is read
+key in the set ([`src/webhook.rs`](src/webhook.rs), through
+`KeySet::verify`). A variable is read
 once, at start, so a new key reaches the service only when the pods
 restart; with two keys valid at once, no webhook is turned away while
 that happens:
 
-1. Add the new key as the second item (`old,new` in the Secret), and roll out.
+1. Add the new key (`old,new` in the Secret), and roll out.
 2. Switch the sender to the new key.
 3. Remove the old key (`new`), and roll out.
 
-The contract allows 1 or 2 keys of 32 to 256 characters each, so a
-trailing comma or a truncated key stops the service at boot instead of
-locking out the sender:
+The generated [CONFIG.md](CONFIG.md) prints these steps for every key set,
+so the field's doc comment does not repeat them.
+
+The contract allows 1 or 2 keys of 32 to 256 characters each, and an
+empty key is never valid, so a trailing comma or a truncated key stops
+the service at boot instead of locking out the sender:
 
 ```console
 $ DATABASE_URL=postgres://orders:pw@localhost:5432/orders \
     WEBHOOK_KEYS=old-webhook-key-0123456789abcdef0123, cargo run -q -p orders
 docuconf: 1 configuration problem:
-  WEBHOOK_KEYS: value has item 1 of 0 characters, below itemMinLength 32 (out_of_range)
+  WEBHOOK_KEYS: value has an empty key at position 1 (out_of_range)
 ```
 
-The field is an `Option<Secret<Vec<String>>>` with `encoding = "csv"`, so
-the Secret holds `old,new` and no key ever prints. The tests in
+The field is an `Option<docuconf::KeySet>`: a key set is always secret,
+reads `old,new` from one Secret key, and never prints a key. The tests in
 [`src/main.rs`](src/main.rs) walk through a rotation, and
 [`smoke.sh`](smoke.sh) posts webhooks signed with both keys.
 [SPEC section 6.1](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md#61-rotation)

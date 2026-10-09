@@ -72,6 +72,7 @@
 //! | `url::Url` | `url` (`max_length`) |
 //! | a `#[derive(DocuconfEnum)]` enum | `enum` |
 //! | `Vec<String>`, `Vec<int>` | `list`, encoding `json` (or `csv` with `encoding = "csv"` and an optional `separator`), with an int item type's range as `itemMin`/`itemMax` (narrow it with `item_min`/`item_max`); string items take `item_min_length`/`item_max_length` |
+//! | [`KeySet`] | `keySet`, always secret, encoding `csv` (or `json`), with `min_keys`, `max_keys`, `key_min_length` and `key_max_length` |
 //! | [`Json<T>`] | `json`, schema from `T: JsonSchema` (`max_length` on its wire string) |
 //! | [`Secret<T>`] | `T`, with `secret: true` |
 //! | `Option<T>` | `T`, optional |
@@ -118,7 +119,11 @@
 //! forbids. Lists are JSON arrays (`["a","b"]`, which figment's `Env` also
 //! parses) unless declared `encoding = "csv"` (`a,b`), durations use Go's syntax (`1m30s`, exactly what Go's
 //! `time.ParseDuration` accepts), and an empty value is unset for every
-//! type but `string`.
+//! type but `string`. Parsing is strict (SPEC §5): a `bool` is `true` or
+//! `false` in any case, an `int` only decimal digits with an optional
+//! sign, a `float` only a decimal number (never `inf`, `NaN`, `.5` or a
+//! hex float), and nothing is trimmed, `csv` items included; anything
+//! else is `invalid_type`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -155,7 +160,7 @@ pub use load::{Export, Loader};
 pub use overlay::{Overlay, OverlayFormat, Reload};
 #[cfg(feature = "keystore")]
 pub use types::Keystore;
-pub use types::{BinaryFile, ConfigFile, Json, Secret, TextFile};
+pub use types::{BinaryFile, ConfigFile, Json, KeySet, Secret, TextFile};
 #[cfg(feature = "tls")]
 pub use types::{CaBundle, TlsKeyPair};
 

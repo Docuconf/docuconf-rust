@@ -461,6 +461,7 @@ dependencies = [
 name = "docuconf"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "docuconf-derive",
  "dotenvy",
  "figment",
@@ -478,6 +479,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "url",
  "x509-parser",
