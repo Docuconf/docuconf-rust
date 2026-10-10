@@ -161,7 +161,7 @@ pub use error::{Code, DeclarationError, Error, ValidationError, Violation};
 pub use export::Meta;
 pub use load::{Export, Loader};
 pub use overlay::{Overlay, OverlayFormat, Reload};
-pub use reload::Watched;
+pub use reload::{RejectedReload, ReloadStatus, Subscription, Watched};
 #[cfg(feature = "keystore")]
 pub use types::Keystore;
 pub use types::{BinaryFile, ConfigFile, Json, KeySet, Secret, TextFile};
