@@ -9,9 +9,9 @@
 #
 #   DOCUCONF_GO_DIR=/path/to/docuconf-go scripts/conformance.sh
 #
-# Needs a Rust toolchain (1.89+), cue, and the docuconf CLI built from that
-# checkout (`go install ./cmd/docuconf`), on PATH or as $DOCUCONF_CLI. docuconf-go's downstream
-# workflow and this repository's CI both call it.
+# Needs a Rust toolchain (1.89+), cue, and the docuconf CLI: $DOCUCONF_CLI,
+# else `docuconf` on PATH, else one built here from that checkout (needs go).
+# docuconf-go's downstream workflow and this repository's CI both call it.
 set -euo pipefail
 
 : "${DOCUCONF_GO_DIR:?set DOCUCONF_GO_DIR to a docuconf-go checkout}"
@@ -22,6 +22,18 @@ export DOCUCONF_SPEC_CUE="${DOCUCONF_SPEC_CUE:-$DOCUCONF_GO_DIR/spec/cue}"
 export DOCUCONF_REQUIRE_CONFORMANCE=1
 export DOCUCONF_REQUIRE_VET=1
 export DOCUCONF_REQUIRE_EXPORT=1
+
+if [ -z "${DOCUCONF_CLI:-}" ]; then
+  if command -v docuconf >/dev/null 2>&1; then
+    DOCUCONF_CLI="$(command -v docuconf)"
+  else
+    cli_dir="$(mktemp -d)"
+    trap 'rm -rf "$cli_dir"' EXIT
+    (cd "$DOCUCONF_GO_DIR/cmd/docuconf" && go build -o "$cli_dir/docuconf" .)
+    DOCUCONF_CLI="$cli_dir/docuconf"
+  fi
+fi
+export DOCUCONF_CLI
 
 cd "$(dirname "$0")/.."
 cargo test --locked -p docuconf --test conformance --test conformance_export --test export --test overlays
