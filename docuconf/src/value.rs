@@ -351,6 +351,9 @@ pub(crate) fn check_value(var: &VarDecl, t: &Typed, from_wire: bool) -> Vec<(Cod
     };
     let mut out = Vec::new();
     let mut push = |c: Code, m: String| out.push((c, format!("{shown} {m}")));
+    // An empty key or list item: one wording in every SDK (SPEC §4.3),
+    // with its 1-based position and never a value.
+    let mut empty = Vec::new();
     match (&var.kind, t) {
         (VarKind::String, Typed::Str(s)) => {
             let n = s.chars().count() as u64;
@@ -428,7 +431,8 @@ pub(crate) fn check_value(var: &VarDecl, t: &Typed, from_wire: bool) -> Vec<(Cod
         (VarKind::KeySet, Typed::List(keys)) => {
             // Each key's length first, an empty key whatever the bounds (a
             // stray separator), then their number. One violation per
-            // variable, and never a key: a key set is secret.
+            // variable, and never a key: a key set is secret. Keys are
+            // counted from 1.
             let lo = var.item_min_length.unwrap_or(1).max(1);
             let hi = var.item_max_length.unwrap_or(u64::MAX);
             let bad = keys.iter().enumerate().find_map(|(i, k)| match k {
@@ -440,14 +444,20 @@ pub(crate) fn check_value(var: &VarDecl, t: &Typed, from_wire: bool) -> Vec<(Cod
             });
             let n = keys.len() as u64;
             if let Some((i, len)) = bad {
-                let m = if len == 0 {
-                    format!("has an empty key at position {i}")
+                let k = i + 1;
+                if len == 0 {
+                    empty.push((Code::OutOfRange, format!("key {k} is empty")));
                 } else if len < lo {
-                    format!("has key {i} of {len} characters, below keyMinLength {lo}")
+                    push(
+                        Code::OutOfRange,
+                        format!("has key {k} of {len} characters, below keyMinLength {lo}"),
+                    );
                 } else {
-                    format!("has key {i} of {len} characters, above keyMaxLength {hi}")
-                };
-                push(Code::OutOfRange, m);
+                    push(
+                        Code::OutOfRange,
+                        format!("has key {k} of {len} characters, above keyMaxLength {hi}"),
+                    );
+                }
             } else if let Some(lo) = var.min_items.filter(|lo| n < *lo) {
                 push(
                     Code::TooFewItems,
@@ -540,12 +550,18 @@ pub(crate) fn check_value(var: &VarDecl, t: &Typed, from_wire: bool) -> Vec<(Cod
                     } else {
                         format!(" {}", Typed::Str(s.clone()).show())
                     };
-                    let m = if n < lo {
+                    let m = if n == 0 {
+                        // Counted from 1, as a key set's keys are.
+                        empty.push((Code::OutOfRange, format!("item {} is empty", i + 1)));
+                        String::new()
+                    } else if n < lo {
                         format!("has item {i}{item} of {n} characters, below itemMinLength {lo}")
                     } else {
                         format!("has item {i}{item} of {n} characters, above itemMaxLength {hi}")
                     };
-                    push(Code::OutOfRange, m);
+                    if !m.is_empty() {
+                        push(Code::OutOfRange, m);
+                    }
                 }
             }
         }
@@ -584,6 +600,7 @@ pub(crate) fn check_value(var: &VarDecl, t: &Typed, from_wire: bool) -> Vec<(Cod
             format!("is not a {} value", k.type_name()),
         ),
     }
+    out.extend(empty);
     out
 }
 

@@ -298,3 +298,63 @@ fn contract_first_negative_duration_and_key_set() {
         "{text}"
     );
 }
+
+#[derive(Deserialize, Docuconf, Debug)]
+#[allow(dead_code)]
+struct PlainKeys {
+    /// Keys that verify, with no length bound but the empty key's.
+    #[docuconf(max_keys = 3)]
+    keys: KeySet,
+
+    /// Tags, none of them empty.
+    #[docuconf(encoding = "csv", item_min_length = 1)]
+    tags: Option<Vec<String>>,
+
+    /// Tokens, none of them empty.
+    #[docuconf(encoding = "csv", item_min_length = 1)]
+    tokens: Option<docuconf::Secret<Vec<String>>>,
+}
+
+/// An empty key is `key N is empty`, an empty list item `item N is empty`,
+/// counted from 1, in both modes, and never shows a key or item.
+#[test]
+fn empty_key_and_item_wording() {
+    let contract = Contract::from_json(
+        r#"{"apiVersion": "docuconf.dev/v1alpha1", "kind": "ConfigContract",
+            "metadata": {"name": "svc"},
+            "vars": {
+              "KEYS": {"type": "keySet", "description": "Keys that verify", "secret": true, "maxKeys": 3},
+              "TAGS": {"type": "list", "items": "string", "description": "Tags", "encoding": "csv", "itemMinLength": 1},
+              "TOKENS": {"type": "list", "items": "string", "description": "Tokens", "encoding": "csv", "itemMinLength": 1, "secret": true}
+            }}"#,
+    )
+    .unwrap();
+    let check = |name: &str, env: &[(&str, &str)], want: &str| {
+        let decl = load::<PlainKeys>(env).unwrap_err();
+        let Error::Validation(decl) = decl else {
+            panic!("{decl}")
+        };
+        let first = contract.load_env(env.iter().copied()).unwrap_err();
+        for e in [decl, first] {
+            let v: Vec<_> = e.violations.iter().filter(|v| v.input == name).collect();
+            assert_eq!(v.len(), 1, "{e}");
+            assert_eq!((v[0].code, v[0].message.as_str()), (Code::OutOfRange, want));
+            for secret in ["old", "new", "tok"] {
+                assert!(!e.to_string().contains(secret), "{e}");
+            }
+        }
+    };
+    check("KEYS", &[("KEYS", "old,")], "key 2 is empty");
+    check("KEYS", &[("KEYS", ",new")], "key 1 is empty");
+    check("KEYS", &[("KEYS", "a,,b")], "key 2 is empty");
+    check(
+        "TAGS",
+        &[("KEYS", "a"), ("TAGS", "x,,y")],
+        "item 2 is empty",
+    );
+    check(
+        "TOKENS",
+        &[("KEYS", "a"), ("TOKENS", ",tok")],
+        "item 1 is empty",
+    );
+}

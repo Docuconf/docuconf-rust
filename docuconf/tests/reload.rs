@@ -10,8 +10,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{leaf, now, World};
-use docuconf::{ConfigFile, Docuconf, Loader, Meta, TextFile, TlsKeyPair, Watched};
+use common::{keystore_bytes, leaf, now, World};
+use docuconf::{
+    Code, ConfigFile, Contract, Docuconf, Keystore, Loader, Meta, Secret, TextFile, TlsKeyPair,
+    Watched,
+};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, docuconf::JsonSchema)]
@@ -319,4 +322,286 @@ fn watched_new_never_reloads() {
     assert_eq!(*t.current(), Some(7));
     assert!(!t.refresh());
     assert_eq!(format!("{t:?}"), "Watched(Some(7))");
+}
+
+#[test]
+fn hooks_run_on_an_accepted_change_only() {
+    let mut f = Fixture::new();
+    let app = f.load();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let sink = seen.clone();
+    let _sub = app
+        .settings
+        .on_change(move |s| sink.lock().unwrap().push(s.name.clone()));
+    let st = app.settings.status();
+    assert_eq!(st.generation, 1);
+    assert_eq!(st.last_reload, None);
+    assert_eq!(st.last_rejected, None);
+
+    // Rejected: no hook, the rejection is in the status.
+    f.settings
+        .update(&[("settings.json", r#"{"name":"billing","replicas":0}"#)]);
+    assert!(!app.settings.refresh());
+    assert!(seen.lock().unwrap().is_empty());
+    let st = app.settings.status();
+    assert_eq!(st.generation, 1);
+    let rej = st.last_rejected.expect("rejected");
+    assert_eq!(rej.input, "settings");
+    assert_eq!(rej.codes, [Code::SchemaMismatch]);
+    assert!(f.warnings().len() == 1);
+
+    // Accepted: the hook gets the new value, the rejection is cleared.
+    let before = std::time::SystemTime::now();
+    f.settings
+        .update(&[("settings.json", r#"{"name":"ledger","replicas":3}"#)]);
+    assert!(app.settings.refresh());
+    assert_eq!(*seen.lock().unwrap(), ["ledger"]);
+    let st = app.settings.status();
+    assert_eq!(st.generation, 2);
+    assert!(st.last_reload.unwrap() >= before);
+    assert_eq!(st.last_rejected, None);
+    assert_eq!(app.settings.generation(), 2);
+    // Clones share hooks and status.
+    assert_eq!(app.settings.clone().status(), st);
+}
+
+#[test]
+fn a_panicking_hook_does_not_stop_the_reload() {
+    let mut f = Fixture::new();
+    let app = f.load();
+    let calls: Arc<Mutex<Vec<&str>>> = Arc::default();
+    let (a, b) = (calls.clone(), calls.clone());
+    let watched = app.creds.clone();
+    app.creds.on_change(move |_| {
+        a.lock().unwrap().push("first");
+        panic!("hook failed");
+    });
+    app.creds.on_change(move |c| {
+        // Inside a hook, current() is the new content.
+        assert_eq!(watched.current().token, c.token);
+        b.lock().unwrap().push("second");
+    });
+    f.creds
+        .update(&[("creds.json", r#"{"token":"tok-0001-second"}"#)]);
+    assert!(app.creds.refresh());
+    assert_eq!(*calls.lock().unwrap(), ["first", "second"]);
+    assert_eq!(app.creds.current().token, "tok-0001-second");
+    assert_eq!(app.creds.generation(), 2);
+    let w = f.warnings();
+    assert_eq!(
+        w,
+        ["creds: an on_change hook panicked; the new content is current"]
+    );
+}
+
+#[test]
+fn unsubscribed_hooks_are_not_called() {
+    let mut f = Fixture::new();
+    let app = f.load();
+    let n = Arc::new(Mutex::new(0));
+    let sink = n.clone();
+    let sub = app.settings.on_change(move |_| *sink.lock().unwrap() += 1);
+    f.settings
+        .update(&[("settings.json", r#"{"name":"billing","replicas":3}"#)]);
+    assert!(app.settings.refresh());
+    sub.unsubscribe();
+    f.settings
+        .update(&[("settings.json", r#"{"name":"ledger","replicas":3}"#)]);
+    assert!(app.settings.refresh());
+    assert_eq!(*n.lock().unwrap(), 1);
+}
+
+#[test]
+fn hooks_run_without_a_read() {
+    let mut f = Fixture::new();
+    let app = f
+        .loader::<App>()
+        .watch_interval(Duration::from_millis(20))
+        .load()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let tx = Mutex::new(tx);
+    app.settings.on_change(move |s| {
+        let _ = tx.lock().unwrap().send(s.name.clone());
+    });
+    f.settings
+        .update(&[("settings.json", r#"{"name":"billing","replicas":3}"#)]);
+    // Nothing reads the input: the background check notices the change.
+    let got = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("no hook call");
+    assert_eq!(got, "billing");
+}
+
+/// Replaces a file with a new one (a new inode), as an agent would.
+fn replace(path: &Path, content: &[u8]) {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, content).unwrap();
+    std::fs::rename(&tmp, path).unwrap();
+}
+
+#[test]
+fn a_keystore_reload_uses_the_boot_password() {
+    #[derive(Debug, Deserialize, Docuconf)]
+    #[allow(dead_code)]
+    struct Client {
+        /// Password of the partner keystore.
+        partner_keystore_password: Secret<String>,
+
+        /// Client certificate for mTLS to the partner API.
+        #[docuconf(
+            path = "/etc/gateway/partner/keystore.p12",
+            password_var = "PARTNER_KEYSTORE_PASSWORD"
+        )]
+        partner_keystore: Watched<Keystore>,
+    }
+    let w = World::new();
+    let warnings: Arc<Mutex<Vec<String>>> = Arc::default();
+    let sink = warnings.clone();
+    let client = w
+        .loader::<Client>()
+        .watch_interval(Duration::ZERO)
+        .on_warning(move |m| sink.lock().unwrap().push(m.to_string()))
+        .load()
+        .unwrap();
+    let first = client.partner_keystore.current().cert_chain()[0].clone();
+    let path = w.path("/etc/gateway/partner/keystore.p12");
+
+    // A new keystore written with another password: the password read at
+    // boot does not open it, so it is rejected and the old one stays.
+    let renewed = leaf(&["partner-client"], Some(&w.ca));
+    replace(&path, &keystore_bytes(&renewed, "rotated-pass"));
+    assert!(!client.partner_keystore.refresh());
+    assert_eq!(client.partner_keystore.current().cert_chain()[0], first);
+    let st = client.partner_keystore.status();
+    assert_eq!(st.generation, 1);
+    assert_eq!(
+        st.last_rejected.map(|r| r.codes),
+        Some(vec![Code::KeystoreUnreadable])
+    );
+    let got = warnings.lock().unwrap().clone();
+    assert!(
+        got.len() == 1 && got[0].ends_with("(keystore_unreadable)"),
+        "{got:?}"
+    );
+    assert!(got
+        .iter()
+        .all(|m| !m.contains("rotated-pass") && !m.contains("s3cret-pass")));
+
+    // The same certificate renewed under the boot password is picked up.
+    replace(&path, &keystore_bytes(&renewed, "s3cret-pass"));
+    assert!(client.partner_keystore.refresh());
+    assert_ne!(client.partner_keystore.current().cert_chain()[0], first);
+    let st = client.partner_keystore.status();
+    assert_eq!((st.generation, st.last_rejected), (2, None));
+}
+
+const WATCH_CONTRACT: &str = r#"{
+    "apiVersion": "docuconf.dev/v1alpha1",
+    "kind": "ConfigContract",
+    "metadata": {"name": "app"},
+    "vars": {
+        "PARTNER_KEYSTORE_PASSWORD": {"type": "string", "description": "Keystore password", "secret": true}
+    },
+    "files": {
+        "settings": {"type": "config", "format": "json", "description": "Application settings",
+                     "path": "/etc/app/settings/settings.json", "reload": "watch",
+                     "schema": {"type": "object", "properties": {"replicas": {"type": "integer", "minimum": 1}}}},
+        "banner": {"type": "text", "description": "Banner", "path": "/etc/app/banner/banner.txt", "reload": "watch"},
+        "keystore": {"type": "keystore", "description": "Client certificate",
+                     "path": "/etc/gateway/partner/keystore.p12", "passwordVar": "PARTNER_KEYSTORE_PASSWORD",
+                     "reload": "watch"},
+        "license": {"type": "text", "description": "Licence key", "path": "/etc/gateway/license/license.key"}
+    }
+}"#;
+
+#[test]
+fn contract_first_reloads_watched_inputs() {
+    let w = World::new();
+    let mut settings = Mount::new(
+        w.path("/etc/app/settings"),
+        &[("settings.json", r#"{"replicas":2}"#)],
+    );
+    let contract = Contract::from_json(WATCH_CONTRACT)
+        .unwrap()
+        .watch_interval(Duration::ZERO);
+    let values = contract
+        .load_env([
+            ("DOCUCONF_FILE_ROOT", w.path("/").to_str().unwrap()),
+            ("PARTNER_KEYSTORE_PASSWORD", "s3cret-pass"),
+        ])
+        .unwrap();
+    // Only inputs declared watch have a handle.
+    assert!(values.watched("license").is_none());
+    let s = values.watched("settings").unwrap();
+    let replicas = |s: &Watched<Option<docuconf::contract::FileValue>>| match s.current().as_ref() {
+        Some(docuconf::contract::FileValue::Config { data, .. }) => data["replicas"].as_i64(),
+        _ => None,
+    };
+    assert_eq!(replicas(&s), Some(2));
+    let seen: Arc<Mutex<Vec<Option<i64>>>> = Arc::default();
+    let sink = seen.clone();
+    s.on_change(move |v| {
+        if let Some(docuconf::contract::FileValue::Config { data, .. }) = v.as_ref() {
+            sink.lock().unwrap().push(data["replicas"].as_i64());
+        }
+    });
+
+    settings.update(&[("settings.json", r#"{"replicas":0}"#)]);
+    assert!(!s.refresh());
+    assert_eq!(replicas(&s), Some(2));
+    assert_eq!(
+        s.status().last_rejected.map(|r| (r.input, r.codes)),
+        Some(("settings".to_string(), vec![Code::SchemaMismatch]))
+    );
+    settings.update(&[("settings.json", r#"{"replicas":5}"#)]);
+    assert!(s.refresh());
+    assert_eq!(replicas(&s), Some(5));
+    assert_eq!(*seen.lock().unwrap(), [Some(5)]);
+    assert_eq!((s.generation(), s.status().last_rejected), (2, None));
+    // file() is the content as loaded.
+    assert_eq!(
+        values
+            .file("settings")
+            .map(|f| f.to_json()["replicas"].clone()),
+        Some(serde_json::json!(2))
+    );
+
+    // An optional watched input that was absent appears.
+    let b = values.watched("banner").unwrap();
+    assert!(b.current().is_none());
+    w.write("/etc/app/banner/banner.txt", b"Hello");
+    assert!(b.refresh());
+    assert!(
+        matches!(b.current().as_ref(), Some(docuconf::contract::FileValue::Text(t)) if t.text() == "Hello")
+    );
+
+    // The keystore is reopened with the password read at load.
+    let k = values.watched("keystore").unwrap();
+    let path = w.path("/etc/gateway/partner/keystore.p12");
+    let renewed = leaf(&["partner-client"], Some(&w.ca));
+    replace(&path, &keystore_bytes(&renewed, "rotated-pass"));
+    assert!(!k.refresh());
+    assert_eq!(
+        k.status().last_rejected.map(|r| r.codes),
+        Some(vec![Code::KeystoreUnreadable])
+    );
+    replace(&path, &keystore_bytes(&renewed, "s3cret-pass"));
+    assert!(k.refresh());
+    assert_eq!(k.generation(), 2);
+}
+
+#[test]
+fn contract_first_rejects_a_watched_overlay() {
+    let e = Contract::from_json(
+        r#"{"apiVersion": "docuconf.dev/v1alpha1", "kind": "ConfigContract",
+            "metadata": {"name": "app"},
+            "overlays": {"platform": {"format": "json", "path": "/etc/app/platform.json", "reload": "watch"}}}"#,
+    )
+    .unwrap_err();
+    let text = e.to_string();
+    assert!(
+        text.contains("overlay platform") && text.contains("reload \"watch\""),
+        "{text}"
+    );
 }

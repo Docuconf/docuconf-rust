@@ -84,7 +84,7 @@ the service at boot instead of locking out the sender:
 $ DATABASE_URL=postgres://orders:pw@localhost:5432/orders \
     WEBHOOK_KEYS=old-webhook-key-0123456789abcdef0123, cargo run -q -p orders
 docuconf: 1 configuration problem:
-  WEBHOOK_KEYS: value has an empty key at position 1 (out_of_range)
+  WEBHOOK_KEYS: key 2 is empty (out_of_range)
 ```
 
 The field is an `Option<docuconf::KeySet>`: a key set is always secret,

@@ -8,7 +8,7 @@ license.workspace = true
 publish = false
 
 # Only what the README tells a user to add: docuconf and serde. The axum
-# section also needs axum and tokio.
+# section also needs axum and tokio, and the reload examples rustls.
 [dependencies]
 docuconf = { path = "../docuconf" }
 serde = { version = "1", features = ["derive"] }
@@ -16,3 +16,4 @@ serde = { version = "1", features = ["derive"] }
 [dev-dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
