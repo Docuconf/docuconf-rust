@@ -264,6 +264,12 @@ mod tests {
                         !text.contains(OLD) && !text.contains(&NEW[..10]),
                         "the error printed a key: {text}"
                     );
+                    if value.ends_with(',') {
+                        assert!(
+                            text.contains("WEBHOOK_KEYS: key 2 is empty (out_of_range)"),
+                            "{text}"
+                        );
+                    }
                 }
                 other => panic!("{value}: want {code:?}, got {other:?}"),
             }

@@ -32,8 +32,11 @@
 //! it (SPEC §4.4, §4.6, §4.7): every variable is layered from its default,
 //! then the selected profile's default, then a config-file overlay, then
 //! the environment; and every file input is read and checked, from under
-//! `DOCUCONF_FILE_ROOT` when that is set. Each file is read once: to pick
-//! up a change to an input declared `reload: watch`, load again.
+//! `DOCUCONF_FILE_ROOT` when that is set. A file input declared
+//! `reload: watch` is reread when it changes, through
+//! [`Values::watched`]; every other file is read once. An overlay declared
+//! `reload: watch` is rejected when the contract is read: overlays are
+//! read once, at load.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -51,6 +54,7 @@ use crate::duration::{format_go, parse_duration, parse_go};
 use crate::env::{self, Env};
 use crate::error::{Code, DeclarationError, Error, ValidationError, Violation};
 use crate::files::{self, FileCx, Outcome};
+use crate::reload::{self, Watched, WatchedInput};
 use crate::types::{BinaryFile, ConfigDoc, KeySet, TextFile};
 use crate::value::{self, Typed};
 
@@ -62,6 +66,7 @@ pub struct Contract {
     files: Vec<FileDecl>,
     profiles: Option<ContractProfiles>,
     overlays: Vec<ContractOverlay>,
+    watch_interval: Duration,
 }
 
 /// One of a contract's config-file overlays (SPEC §4.7).
@@ -306,13 +311,23 @@ impl FileValue {
     }
 }
 
+/// A watched file input in contract-first mode is a
+/// `Watched<Option<FileValue>>`; see [`Values::watched`].
+impl WatchedInput for FileValue {
+    fn from_loaded(b: Option<Box<dyn std::any::Any + Send>>) -> Result<Self, String> {
+        b.and_then(FileValue::from_loaded)
+            .ok_or_else(|| "docuconf: the file input did not load".to_string())
+    }
+}
+
 /// The typed value of every variable in a contract, `None` for an optional
 /// variable that is unset and has no default, and every file input, `None`
 /// for an optional one that is absent. `Debug` hides secret values.
 #[derive(Clone)]
 pub struct Values {
     values: BTreeMap<String, Option<Value>>,
-    files: BTreeMap<String, Option<Arc<FileValue>>>,
+    files: BTreeMap<String, Arc<Option<FileValue>>>,
+    watched: BTreeMap<String, Watched<Option<FileValue>>>,
     secrets: BTreeSet<String>,
 }
 
@@ -323,7 +338,12 @@ impl PartialEq for Values {
         let files = |v: &Values| -> BTreeMap<String, Json> {
             v.files
                 .iter()
-                .map(|(k, f)| (k.clone(), f.as_ref().map_or(Json::Null, |f| f.to_json())))
+                .map(|(k, f)| {
+                    (
+                        k.clone(),
+                        f.as_ref().as_ref().map_or(Json::Null, |f| f.to_json()),
+                    )
+                })
                 .collect()
         };
         self.values == other.values && self.secrets == other.secrets && files(self) == files(other)
@@ -341,14 +361,60 @@ impl Values {
         self.values.iter().map(|(k, v)| (k.as_str(), v.as_ref()))
     }
 
-    /// A file input, `None` when it is absent or not declared.
+    /// A file input as it was at load, `None` when it was absent or is not
+    /// declared. For an input declared `reload: watch`, use
+    /// [`watched`](Values::watched) to get its current content.
     pub fn file(&self, name: &str) -> Option<&FileValue> {
-        self.files.get(name).and_then(|f| f.as_deref())
+        self.files.get(name).and_then(|f| f.as_ref().as_ref())
+    }
+
+    /// A file input declared `reload: watch`: a handle whose
+    /// [`current`](Watched::current) rereads the file when it changes, with
+    /// the same checks as at load, and which takes
+    /// [`on_change`](Watched::on_change) hooks and reports its
+    /// [`status`](Watched::status). `None` (the content) when the file is
+    /// absent; `None` (the handle) when the input is not declared or not
+    /// declared `reload: watch`. Clones share the content.
+    ///
+    /// ```
+    /// # let dir = tempfile::tempdir().unwrap();
+    /// # std::fs::create_dir_all(dir.path().join("etc/app")).unwrap();
+    /// # std::fs::write(dir.path().join("etc/app/banner.txt"), "Hello").unwrap();
+    /// let contract = docuconf::Contract::from_json(r#"{
+    ///     "apiVersion": "docuconf.dev/v1alpha1",
+    ///     "kind": "ConfigContract",
+    ///     "metadata": {"name": "web"},
+    ///     "files": {
+    ///         "banner": {"type": "text", "description": "Home page banner",
+    ///                    "path": "/etc/app/banner.txt", "reload": "watch"}
+    ///     }
+    /// }"#).unwrap();
+    /// let values = contract
+    ///     .load_env([("DOCUCONF_FILE_ROOT", dir.path().to_str().unwrap())])
+    ///     .unwrap();
+    /// let banner = values.watched("banner").unwrap();
+    /// let text = |b: &docuconf::Watched<Option<docuconf::contract::FileValue>>| {
+    ///     match b.current().as_ref() {
+    ///         Some(docuconf::contract::FileValue::Text(t)) => t.text().to_string(),
+    ///         _ => String::new(),
+    ///     }
+    /// };
+    /// assert_eq!(text(&banner), "Hello");
+    ///
+    /// std::fs::write(dir.path().join("etc/app/banner.txt"), "Hi again").unwrap();
+    /// assert!(banner.refresh());
+    /// assert_eq!(text(&banner), "Hi again");
+    /// assert_eq!(banner.status().generation, 2);
+    /// ```
+    pub fn watched(&self, name: &str) -> Option<Watched<Option<FileValue>>> {
+        self.watched.get(name).cloned()
     }
 
     /// Every declared file input, sorted by name.
     pub fn files(&self) -> impl Iterator<Item = (&str, Option<&FileValue>)> {
-        self.files.iter().map(|(k, v)| (k.as_str(), v.as_deref()))
+        self.files
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_ref().as_ref()))
     }
 
     /// Whether the contract marks a variable or file input `secret`.
@@ -367,7 +433,10 @@ impl Values {
             .map(|(k, v)| (k.clone(), v.as_ref().map_or(Json::Null, Value::to_json)))
             .collect();
         for (k, f) in &self.files {
-            m.insert(k.clone(), f.as_ref().map_or(Json::Null, |f| f.to_json()));
+            m.insert(
+                k.clone(),
+                f.as_ref().as_ref().map_or(Json::Null, |f| f.to_json()),
+            );
         }
         Json::Object(m)
     }
@@ -383,7 +452,7 @@ impl fmt::Debug for Values {
             };
         }
         for (k, v) in &self.files {
-            match v {
+            match v.as_ref() {
                 Some(_) if self.secrets.contains(k) => m.entry(k, &"***"),
                 v => m.entry(k, v),
             };
@@ -685,7 +754,11 @@ fn overlay_decl(name: &str, spec: &Json) -> Result<ContractOverlay, Vec<String>>
         f.bad("keySeparator must be \":\" or \".\"".into());
     }
     match f.str("reload") {
-        None | Some("restart" | "watch") => {}
+        None | Some("restart") => {}
+        Some("watch") => f.bad(
+            "reload \"watch\" is not supported for an overlay: this SDK reads overlays once, at load; declare reload \"restart\""
+                .into(),
+        ),
         Some(other) => f.bad(format!("reload {other:?} must be restart or watch")),
     }
     if f.problems.is_empty() {
@@ -1071,7 +1144,16 @@ impl Contract {
             files,
             profiles,
             overlays,
+            watch_interval: reload::DEFAULT_INTERVAL,
         })
+    }
+
+    /// How often a watched file input looks at its files, at most: on
+    /// access, and in the background while it has an
+    /// [`on_change`](Watched::on_change) hook. A second by default.
+    pub fn watch_interval(mut self, interval: Duration) -> Self {
+        self.watch_interval = interval;
+        self
     }
 
     /// The contract's `metadata.name`.
@@ -1328,19 +1410,26 @@ impl Contract {
             values: &typed,
         };
         let mut files = BTreeMap::new();
+        let mut watched = BTreeMap::new();
         for f in &self.files {
-            match files::check(f, &fcx) {
-                Outcome::Absent => {
-                    files.insert(f.name.clone(), None);
+            let loaded = match files::check(f, &fcx) {
+                Outcome::Absent => None,
+                Outcome::Failed(v) => {
+                    violations.extend(v);
+                    continue;
                 }
-                Outcome::Failed(v) => violations.extend(v),
                 Outcome::Loaded(b) => {
                     if let Some(w) = file_deprecation(f) {
                         warnings.push(w);
                     }
-                    files.insert(f.name.clone(), FileValue::from_loaded(b).map(Arc::new));
+                    Some(b)
                 }
+            };
+            let value = Arc::new(loaded.and_then(FileValue::from_loaded));
+            if f.watch {
+                watched.insert(f.name.clone(), self.watch(f, &fcx, &typed, value.clone()));
             }
+            files.insert(f.name.clone(), value);
         }
         if !violations.is_empty() {
             return Err(ValidationError { violations });
@@ -1348,6 +1437,7 @@ impl Contract {
         Ok(Values {
             values,
             files,
+            watched,
             secrets: self
                 .vars
                 .iter()
@@ -1361,6 +1451,36 @@ impl Contract {
                 )
                 .collect(),
         })
+    }
+}
+
+impl Contract {
+    /// The handle of a file input declared `reload: watch`, starting from
+    /// `initial`. The keystore password is the one read now.
+    fn watch(
+        &self,
+        f: &FileDecl,
+        fcx: &FileCx,
+        typed: &HashMap<String, Typed>,
+        initial: Arc<Option<FileValue>>,
+    ) -> Watched<Option<FileValue>> {
+        let source = reload::Source {
+            decl: f.clone(),
+            path: files::resolve_path(f, fcx),
+            values: f
+                .password_var
+                .iter()
+                .filter_map(|n| typed.get(n).map(|v| (n.clone(), v.clone())))
+                .collect(),
+            now: None,
+            interval: self.watch_interval,
+            warn: None,
+        };
+        Watched::from_source(
+            initial,
+            source,
+            <Option<FileValue> as WatchedInput>::from_loaded,
+        )
     }
 }
 

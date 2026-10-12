@@ -72,7 +72,7 @@ code=$?
 set -e
 cat >"$tmp/want.txt" <<'WANT'
 docuconf: 1 configuration problem:
-  WEBHOOK_KEYS: value has an empty key at position 1 (out_of_range)
+  WEBHOOK_KEYS: key 2 is empty (out_of_range)
 WANT
 if [ "$code" != 1 ] || ! diff -u "$tmp/want.txt" "$tmp/bad.txt" || grep -q webhook-key "$tmp/bad.txt"; then
   echo "want exit 1 for an empty webhook key, got $code:" >&2; cat "$tmp/bad.txt" >&2; exit 1

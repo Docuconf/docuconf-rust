@@ -422,7 +422,9 @@ The serde key is upper-cased as it is, with no `_` inserted: under `#[serde(rena
 A `KeySet` holds the keys that are all valid at once on the side that verifies (webhook signatures, inbound
 API keys), so a key can be rotated without an outage (spec §4.3, §6.1). The platform supplies it as one Secret
 key holding `old,new` during a rotation; keys are never trimmed, and an empty key (a stray comma) is always
-`out_of_range`. Like `Secret`, it prints and serializes as `***`, and errors never show a key.
+`out_of_range`, reported as `key N is empty` with N counted from 1 (`old,` is `WEBHOOK_KEYS: key 2 is empty
+(out_of_range)`). An empty item of a list with `item_min_length` is `item N is empty` the same way. Like `Secret`,
+it prints and serializes as `***`, and errors never show a key.
 
 ```rust
 use docuconf::{Docuconf, KeySet};
@@ -509,7 +511,7 @@ pub fn new_checkout(config: &Config) -> bool {
 `current()` returns an `Arc<T>` of the current content. At most once a second (`Loader::watch_interval`
 changes that) it first looks at the metadata of the files the input reads, following symlinks, so the
 `..data` symlink swap Kubernetes makes when it updates a projected volume shows up as a different file; there is
-no background thread and no extra dependency. `refresh()` looks right away. A change is read again and passes
+no extra dependency. `refresh()` looks right away. A change is read again and passes
 the same checks as at boot. A changed file that fails them is not used: the previous content stays current and
 each problem goes to `Loader::on_warning` (stderr by default) once per change, with its code and never the
 file's content, for example `settings: changed file rejected, keeping the previous content: is not a valid JSON
@@ -518,6 +520,106 @@ is picked up (and one that is removed becomes `None`); `Option<Watched<T>>` is a
 `reload = "watch"` on a field that is not `Watched<T>` is a compile error. Clones of a `Watched<T>` share the
 content, so hand one to each handler. Kubernetes never updates a file mounted with `subPath`: mount the
 directory.
+
+A keystore is reopened with the password read at boot: environment variables do not change in a running
+process, so rotating a keystore's password needs a rollout. A new keystore written with another password is
+rejected as `keystore_unreadable` and the previous one stays current.
+
+### Using a watched value
+
+Anything built once from the value (a TLS server context, an HTTP client, a connection pool) never sees a
+reload, and serves the old certificate until it expires. Either read `current()` on every use, or rebuild it in
+an `on_change` hook:
+
+- `watched.on_change(|new: Arc<T>| ...)` registers a hook, called with the new content after a change passes
+  every check and becomes current, never for a rejected change. Several hooks may be registered; they run in
+  order, and one that panics is logged by input name only (never the content) without stopping the others or
+  the reload. It returns a `Subscription`; `subscription.unsubscribe()` removes the hook (dropping it does not).
+- While a hook is registered, a background thread (one per input, named `docuconf-watch-<input>`) looks at the
+  files once per watch interval, so hooks run without a read; it stops when the hooks are unsubscribed or the
+  `Watched` is dropped. A `current()` or `refresh()` that notices a change first runs the hooks itself, before it
+  returns. Inside one of its hooks, the input's `current()` is the new content.
+
+A TLS server built with rustls reads the key pair rebuilt by the hook on every handshake:
+
+```rust
+use std::sync::{Arc, RwLock};
+
+use docuconf::{TlsKeyPair, Watched};
+use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::sign::CertifiedKey;
+
+#[derive(Debug)]
+pub struct ServingCert(RwLock<Arc<CertifiedKey>>);
+
+fn certified(pair: &TlsKeyPair) -> Arc<CertifiedKey> {
+    let key = rustls::crypto::ring::sign::any_supported_type(&pair.private_key()).expect("checked at load");
+    Arc::new(CertifiedKey::new(pair.cert_chain().to_vec(), key))
+}
+
+impl ResolvesServerCert for ServingCert {
+    fn resolve(&self, _: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        Some(self.0.read().unwrap().clone())
+    }
+}
+
+pub fn server_config(tls: &Watched<TlsKeyPair>) -> rustls::ServerConfig {
+    let cert = Arc::new(ServingCert(RwLock::new(certified(&tls.current()))));
+    let hook = Arc::downgrade(&cert);
+    tls.on_change(move |pair| {
+        if let Some(cert) = hook.upgrade() {
+            *cert.0.write().unwrap() = certified(&pair);
+        }
+    });
+    rustls::ServerConfig::builder().with_no_client_auth().with_cert_resolver(cert)
+}
+```
+
+An HTTP client takes the TLS config of its CA bundle; build it per use from `current()`, or (cheaper) keep one
+and swap it in the hook, and build each new connection pool from `tls()`:
+
+```rust
+use std::sync::{Arc, RwLock};
+
+use docuconf::{CaBundle, Watched};
+
+pub struct Upstream(RwLock<Arc<rustls::ClientConfig>>);
+
+fn client_config(ca: &CaBundle) -> Arc<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add_parsable_certificates(ca.certificates().iter().cloned());
+    Arc::new(rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth())
+}
+
+impl Upstream {
+    pub fn new(ca: &Watched<CaBundle>) -> Arc<Upstream> {
+        let up = Arc::new(Upstream(RwLock::new(client_config(&ca.current()))));
+        let hook = Arc::downgrade(&up);
+        ca.on_change(move |ca| {
+            if let Some(up) = hook.upgrade() {
+                *up.0.write().unwrap() = client_config(&ca);
+            }
+        });
+        up
+    }
+
+    /// The TLS config to open the next connection with (for reqwest,
+    /// `ClientBuilder::use_preconfigured_tls`).
+    pub fn tls(&self) -> Arc<rustls::ClientConfig> {
+        self.0.read().unwrap().clone()
+    }
+}
+```
+
+### Reload status
+
+`watched.status()` returns a `ReloadStatus` for a health check or a metric, never holding content:
+
+| Field | Meaning |
+|---|---|
+| `generation` | 1 after boot, plus one per accepted reload (also `watched.generation()`) |
+| `last_reload` | `Option<SystemTime>`: when the last accepted reload happened, `None` before the first |
+| `last_rejected` | `Option<RejectedReload>`: the last change that failed its checks, as `time`, `input` and the violation `codes`; cleared when a later change is accepted |
 
 ## Cargo features
 
@@ -656,6 +758,11 @@ their wire form), then the environment; every file input (`config` in JSON, YAML
 `keystore`, `text`, `binary`) is read and checked as at boot, and returned by `Values::file`. A `go` duration may
 be negative here (`Value::NegativeDuration`), and a key set is a `Value::KeySet`.
 
+A file input the contract declares `reload: watch` is reloaded too: `values.watched("name")` returns a
+`Watched<Option<FileValue>>` with the same checks, `on_change` hooks and `status()` as above
+(`Contract::watch_interval` sets the interval), while `Values::file` keeps the content as loaded. An overlay
+declared `reload: watch` is rejected when the contract is read, naming the overlay: overlays are read once.
+
 ## Conformance
 
 `tests/conformance.rs` runs docuconf-go's shared conformance suite (spec §12, `conformance/cases.json`) through
@@ -682,8 +789,8 @@ CLI a failure). The export must match with no difference; `tests/golden/gateway.
 
 ## Not yet supported
 
-- `reload: "watch"` for overlays (`Reload::Watch` is rejected at declaration time; the overlay is read once at
-  boot). File inputs support it through `Watched<T>`.
+- `reload: "watch"` for overlays (`Reload::Watch` is rejected at declaration time, and by `Contract::from_json`;
+  the overlay is read once at boot). File inputs support it through `Watched<T>`, in both modes.
 - JKS keystores (PKCS#12 only).
 - Falling back from a variable to its `replaced_by` successor; deprecated variables only warn when set.
 - Markdown docs generation (a SHOULD in the spec).
