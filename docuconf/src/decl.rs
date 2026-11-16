@@ -235,6 +235,10 @@ pub(crate) struct FileDecl {
     pub pattern: Option<(String, Regex)>,
     pub min_length: Option<u64>,
     pub max_length: Option<u64>,
+    /// Contract-first mode: the `requiredIf` condition (SPEC §4.2.1) that
+    /// makes the input required at this load, as messages write it
+    /// (`TLS_ENABLED is true`).
+    pub required_when: Option<String>,
 }
 
 impl FileDecl {
@@ -1098,6 +1102,7 @@ impl DeclCx {
             pattern,
             min_length: a.min_length,
             max_length: a.max_length,
+            required_when: None,
         };
         for p in problems {
             self.problems.push(format!("{label}: {p}"));

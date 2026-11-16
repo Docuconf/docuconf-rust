@@ -763,6 +763,24 @@ A file input the contract declares `reload: watch` is reloaded too: `values.watc
 (`Contract::watch_interval` sets the interval), while `Values::file` keeps the content as loaded. An overlay
 declared `reload: watch` is rejected when the contract is read, naming the overlay: overlays are read once.
 
+The contract's `requiredIf`, `roles` and `includes` (spec §4.2.1, §4.9, §4.8) are read and checked as the
+meta-schema checks them, and applied at load (contract-first only; the derive has no attributes for them yet):
+
+- **`requiredIf: {VAR: value}`**, on a variable or a file input, makes it required while `VAR`'s loaded value
+  (environment, overlay, selected profile or default) equals `value`. A missing variable is `missing_required`
+  with the condition in the message, the value as JSON (`LOG_SCHEMA_URL: is required when LOG_FORMAT is
+  "json"`); a missing file is `file_missing`, its message ending `, and is required when TLS_ENABLED is true`. A
+  condition variable with a violation of its own makes nothing required. The contract is rejected when the
+  condition names an undeclared, secret or non-`string`/`int`/`bool`/`enum` variable, the input itself, or a
+  value that variable cannot hold (a bool is never an int), or when the input is required, deprecated or has a
+  default.
+- **`roles`**: `DOCUCONF_ROLE` names the workload's role. An input whose `roles` do not include it is optional;
+  without a valid role, every role-specific input is, so the role is the one problem reported. The contract must
+  declare `DOCUCONF_ROLE` as a required enum whose values are exactly the roles, and each input's roles must be
+  among them. `Contract::roles()` returns them.
+- **`includes`**: the well-known fragments, `name@major`, returned by `Contract::includes()`. Their variables are
+  inline in `vars` and load like any other.
+
 ## Conformance
 
 `tests/conformance.rs` runs docuconf-go's shared conformance suite (spec §12, `conformance/cases.json`) through
@@ -777,10 +795,14 @@ DOCUCONF_CONFORMANCE=../docuconf-go/conformance/cases.json DOCUCONF_REQUIRE_CONF
 Failures are reported by case id. The runner keeps an allow-list of the capability tags the SDK supports, and
 skips (never runs) a case with a tag it does not know. The SDK supports every tag: `int64` (Rust holds every
 64-bit integer), `json-schema` (`json` values are checked with the `jsonschema` crate), and the transitional
-`key-set`, `deprecated`, `strict-parsing`, `files`, `profiles` and `overlays`. **No case is skipped**, and the
+`key-set`, `deprecated`, `strict-parsing`, `files`, `profiles`, `overlays`, `required-if` and `roles`. **No case is skipped**, and the
 test fails if one is. (A build without the `tls` or `keystore` cargo feature cannot load TLS key pairs, CA
 bundles or keystores, and skips just the cases that declare one.) CI runs the suite against the pinned
 docuconf-go commit, and nightly against `main`.
+
+The same test file runs `cases.pending.json`, next to `cases.json`: the cases of features not every SDK has
+yet. Its cases with a supported tag must pass, and the others are skipped; the run is skipped when the file is
+missing. The SDK supports its `required-if` and `roles` tags.
 
 `tests/conformance_export.rs` declares the shared export fixture (`conformance/export/fixture.yaml`) with this
 SDK's attributes, exports it, and compares it with `conformance/export/golden.cue` using
