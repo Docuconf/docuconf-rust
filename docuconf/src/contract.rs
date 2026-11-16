@@ -67,6 +67,185 @@ pub struct Contract {
     profiles: Option<ContractProfiles>,
     overlays: Vec<ContractOverlay>,
     watch_interval: Duration,
+    includes: Vec<String>,
+    roles: Option<Vec<String>>,
+    /// Each input's `requiredIf` (SPEC §4.2.1), by input name.
+    conditions: BTreeMap<String, Condition>,
+    /// Each input's `roles` (SPEC §4.9), by input name.
+    input_roles: BTreeMap<String, Vec<String>>,
+}
+
+/// The variable that names a workload's role (SPEC §4.9).
+const ROLE_VAR: &str = "DOCUCONF_ROLE";
+
+/// A `requiredIf` condition (SPEC §4.2.1): the input is required while
+/// `var` has `value`.
+#[derive(Debug, Clone, PartialEq)]
+struct Condition {
+    var: String,
+    value: ConditionValue,
+}
+
+/// A condition's value: a string, an integer or a boolean, kept apart (an
+/// `int` variable never equals `true`).
+#[derive(Debug, Clone, PartialEq)]
+enum ConditionValue {
+    Str(String),
+    Int(i64),
+    Bool(bool),
+}
+
+impl Condition {
+    /// Whether a variable's loaded value is the condition's value.
+    fn holds_for(&self, loaded: Option<&Typed>) -> bool {
+        match (&self.value, loaded) {
+            (ConditionValue::Str(a), Some(Typed::Str(b))) => a == b,
+            (ConditionValue::Int(a), Some(Typed::Int(b))) => a == b,
+            (ConditionValue::Bool(a), Some(Typed::Bool(b))) => a == b,
+            _ => false,
+        }
+    }
+
+    /// The value as the condition variable's own type holds it, or `None`
+    /// when that variable cannot hold a value of its kind.
+    fn typed_for(&self, kind: &VarKind) -> Option<Typed> {
+        match (kind, &self.value) {
+            (VarKind::String | VarKind::Enum(_), ConditionValue::Str(s)) => {
+                Some(Typed::Str(s.clone()))
+            }
+            (VarKind::Int { .. }, ConditionValue::Int(i)) => Some(Typed::Int(*i)),
+            (VarKind::Bool, ConditionValue::Bool(b)) => Some(Typed::Bool(*b)),
+            _ => None,
+        }
+    }
+}
+
+/// The condition as messages write it, the value as JSON: `TLS_ENABLED is
+/// true`, `LOG_FORMAT is "json"`.
+impl fmt::Display for Condition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.value {
+            ConditionValue::Str(s) => write!(f, "{} is {}", self.var, Json::String(s.clone())),
+            ConditionValue::Int(i) => write!(f, "{} is {i}", self.var),
+            ConditionValue::Bool(b) => write!(f, "{} is {b}", self.var),
+        }
+    }
+}
+
+/// Whether `s` is a role name: a DNS label (SPEC §4.9).
+fn is_role_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    let ok = |c: &u8| c.is_ascii_lowercase() || c.is_ascii_digit();
+    !b.is_empty()
+        && b.len() <= 63
+        && ok(&b[0])
+        && ok(&b[b.len() - 1])
+        && b.iter().all(|c| ok(c) || *c == b'-')
+}
+
+/// Whether `s` names a well-known fragment, `name@major` (SPEC §4.8).
+fn is_fragment_ref(s: &str) -> bool {
+    let Some((name, major)) = s.split_once('@') else {
+        return false;
+    };
+    let n = name.as_bytes();
+    let m = major.as_bytes();
+    !n.is_empty()
+        && n[0].is_ascii_lowercase()
+        && n.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+        && !m.is_empty()
+        && m[0] != b'0'
+        && m.iter().all(u8::is_ascii_digit)
+}
+
+/// A list of roles (SPEC §4.9): DNS labels, at least one, none listed
+/// twice. `None` when absent. `what` prefixes each problem.
+fn read_roles(node: Option<&Json>, what: &str, problems: &mut Vec<String>) -> Option<Vec<String>> {
+    let node = node.filter(|v| !v.is_null())?;
+    let roles: Vec<String> = match node {
+        Json::Array(a) if !a.is_empty() && a.iter().all(Json::is_string) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect(),
+        _ => {
+            problems.push(format!(
+                "{what}roles must be a list of at least one role name"
+            ));
+            return None;
+        }
+    };
+    for (i, r) in roles.iter().enumerate() {
+        if !is_role_name(r) {
+            problems.push(format!("{what}role {r:?} must be a DNS label"));
+        } else if roles[..i].contains(r) {
+            problems.push(format!("{what}role {r} is listed twice"));
+        }
+    }
+    Some(roles)
+}
+
+/// The well-known fragments a contract includes (SPEC §4.8), `name@major`.
+fn read_includes(node: Option<&Json>, problems: &mut Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    match node {
+        None | Some(Json::Null) => {}
+        Some(Json::Array(a)) if a.iter().all(Json::is_string) => {
+            for name in a.iter().filter_map(Json::as_str) {
+                if !is_fragment_ref(name) {
+                    problems.push(format!(
+                        "includes: {name:?} is not a fragment name, name@major"
+                    ));
+                } else if out.iter().any(|x| x == name) {
+                    problems.push(format!("includes: {name} is listed twice"));
+                } else {
+                    out.push(name.to_string());
+                }
+            }
+        }
+        Some(_) => {
+            problems.push("includes must be a list of fragment names, such as otel@1".into())
+        }
+    }
+    out
+}
+
+/// `requiredIf: {VAR: value}` (SPEC §4.2.1): one variable and a string,
+/// integer or boolean value. `None` when absent or malformed.
+fn read_required_if(
+    node: Option<&Json>,
+    what: &str,
+    problems: &mut Vec<String>,
+) -> Option<Condition> {
+    let node = node.filter(|v| !v.is_null())?;
+    let Some((var, value)) = node
+        .as_object()
+        .filter(|o| o.len() == 1)
+        .and_then(|o| o.iter().next())
+    else {
+        problems.push(format!(
+            "{what}requiredIf must name one variable and its value: {{VAR: value}}"
+        ));
+        return None;
+    };
+    let value = match value {
+        Json::Bool(b) => Some(ConditionValue::Bool(*b)),
+        Json::String(s) => Some(ConditionValue::Str(s.clone())),
+        Json::Number(n) => n.as_i64().map(ConditionValue::Int),
+        _ => None,
+    };
+    match value {
+        Some(value) if is_env_name(var) => Some(Condition {
+            var: var.clone(),
+            value,
+        }),
+        _ => {
+            problems.push(format!(
+                "{what}requiredIf must name one variable and a string, integer or boolean value"
+            ));
+            None
+        }
+    }
 }
 
 /// One of a contract's config-file overlays (SPEC §4.7).
@@ -720,6 +899,7 @@ fn file_decl(name: &str, spec: &Json) -> Result<FileDecl, Vec<String>> {
         pattern,
         min_length: f.uint("minLength"),
         max_length: f.uint("maxLength"),
+        required_when: None,
     };
     if f.problems.is_empty() {
         Ok(decl)
@@ -1002,6 +1182,122 @@ fn var_decl(name: &str, spec: &Json) -> Result<VarDecl, Vec<String>> {
     }
 }
 
+/// The inputs' roles against the contract's (SPEC §4.9), and
+/// `DOCUCONF_ROLE`: a required enum whose values are exactly the roles,
+/// used by every role.
+fn check_roles(
+    vars: &[VarDecl],
+    files: &[FileDecl],
+    roles: Option<&[String]>,
+    input_roles: &BTreeMap<String, Vec<String>>,
+    problems: &mut Vec<String>,
+) {
+    for (name, used) in input_roles {
+        let what = if files.iter().any(|f| &f.name == name) {
+            format!("file input {name}")
+        } else {
+            name.clone()
+        };
+        let Some(roles) = roles else {
+            problems.push(format!("{what}: has roles, but the contract declares none"));
+            continue;
+        };
+        for r in used.iter().filter(|r| !roles.contains(r)) {
+            problems.push(format!(
+                "{what}: role {r} is not one of the contract's roles, {}",
+                roles.join(", ")
+            ));
+        }
+    }
+    let Some(roles) = roles else { return };
+    let ok = vars.iter().find(|v| v.name == ROLE_VAR).is_some_and(|v| {
+        v.required
+            && !input_roles.contains_key(ROLE_VAR)
+            && matches!(&v.kind, VarKind::Enum(values) if values == roles)
+    });
+    if !ok {
+        problems.push(format!(
+            "{ROLE_VAR}: a contract with roles declares it as a required enum whose values are the roles, {}, used by every role",
+            roles.join(", ")
+        ));
+    }
+}
+
+/// Each input's `requiredIf` against the variables (SPEC §4.2.1): the
+/// condition names another declared variable, a plain `string`, `int`,
+/// `bool` or `enum` one, with a value it can hold; the input is neither
+/// required nor deprecated, and has no default.
+fn check_conditions(
+    vars: &[VarDecl],
+    files: &[FileDecl],
+    conditions: &BTreeMap<String, Condition>,
+    problems: &mut Vec<String>,
+) {
+    for (name, c) in conditions {
+        let (what, required, has_default, deprecated) = match files.iter().find(|f| &f.name == name)
+        {
+            Some(f) => (
+                format!("file input {name}"),
+                f.required,
+                false,
+                f.deprecated.is_some(),
+            ),
+            None => match vars.iter().find(|v| &v.name == name) {
+                Some(v) => (
+                    name.clone(),
+                    v.required,
+                    v.default.is_some(),
+                    v.deprecated.is_some(),
+                ),
+                // Its own declaration was rejected and reported.
+                None => continue,
+            },
+        };
+        if required || has_default {
+            problems.push(format!(
+                "{what}: an input with requiredIf is neither required nor has a default"
+            ));
+        }
+        if deprecated {
+            problems.push(format!(
+                "{what}: a conditionally required input cannot be deprecated: the platform could not stop setting it"
+            ));
+        }
+        let on = vars.iter().find(|v| v.name == c.var);
+        let Some(on) = on.filter(|_| &c.var != name) else {
+            problems.push(format!(
+                "{what}: requiredIf must name another declared variable, not {:?}",
+                c.var
+            ));
+            continue;
+        };
+        let plain = matches!(
+            on.kind,
+            VarKind::String | VarKind::Int { .. } | VarKind::Bool | VarKind::Enum(_)
+        );
+        if on.secret || !plain {
+            problems.push(format!(
+                "{what}: requiredIf names {}, which is not a plain string, int, bool or enum variable",
+                on.name
+            ));
+            continue;
+        }
+        let problem = match c.typed_for(&on.kind) {
+            None => Some(String::new()),
+            Some(t) => value::check(on, &t)
+                .into_iter()
+                .next()
+                .map(|(_, m)| format!(": {m}")),
+        };
+        if let Some(p) = problem {
+            problems.push(format!(
+                "{what}: requiredIf: {c} is not a value {} can have{p}",
+                on.name
+            ));
+        }
+    }
+}
+
 impl Contract {
     /// Reads a contract from its JSON form (`cue export contract.cue`).
     pub fn from_json(json: &str) -> Result<Contract, DeclarationError> {
@@ -1063,6 +1359,35 @@ impl Contract {
             Some(_) => problems.push("files must be an object".into()),
         }
         files.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // requiredIf (SPEC §4.2.1) and roles (SPEC §4.9), on variables and
+        // file inputs alike.
+        let includes = read_includes(top.get("includes"), &mut problems);
+        let roles = read_roles(top.get("roles"), "", &mut problems);
+        let mut conditions = BTreeMap::new();
+        let mut input_roles = BTreeMap::new();
+        let inputs = [("vars", ""), ("files", "file input ")];
+        for (section, label) in inputs {
+            for (name, spec) in top
+                .get(section)
+                .and_then(Json::as_object)
+                .into_iter()
+                .flatten()
+            {
+                let what = format!("{label}{name}: ");
+                let spec = spec.as_object();
+                let field = |k: &str| spec.and_then(|o| o.get(k));
+                if let Some(c) = read_required_if(field("requiredIf"), &what, &mut problems) {
+                    conditions.insert(name.clone(), c);
+                }
+                if let Some(r) = read_roles(field("roles"), &what, &mut problems) {
+                    input_roles.insert(name.clone(), r);
+                }
+            }
+        }
+        check_roles(&vars, &files, roles.as_deref(), &input_roles, &mut problems);
+        check_conditions(&vars, &files, &conditions, &mut problems);
+
         for f in &files {
             if let Some(pv) = &f.password_var {
                 if !vars.iter().any(|v| &v.name == pv) {
@@ -1145,7 +1470,25 @@ impl Contract {
             profiles,
             overlays,
             watch_interval: reload::DEFAULT_INTERVAL,
+            includes,
+            roles,
+            conditions,
+            input_roles,
         })
+    }
+
+    /// The well-known fragments the contract includes (SPEC §4.8), as
+    /// `name@major`. Their variables are inline in `vars`, and load like
+    /// any other.
+    pub fn includes(&self) -> &[String] {
+        &self.includes
+    }
+
+    /// The roles the image runs as (SPEC §4.9), `None` when the contract
+    /// declares none. `DOCUCONF_ROLE` names a workload's role: an input
+    /// whose `roles` do not include it is optional at load.
+    pub fn roles(&self) -> Option<&[String]> {
+        self.roles.as_deref()
     }
 
     /// How often a watched file input looks at its files, at most: on
@@ -1324,8 +1667,22 @@ impl Contract {
             .and_then(|p| p.defaults.get(self.selected_profile(p, env)));
         let mut violations = Vec::new();
         let overlays = self.overlay_values(root.as_deref(), &mut violations, warnings);
+        // Roles (SPEC §4.9): an input that only other roles use is optional
+        // here. With no role, or one the contract does not declare, every
+        // role-specific input is optional, so the role is the one problem
+        // reported about roles.
+        let role = self
+            .roles
+            .as_ref()
+            .and_then(|roles| env.get(ROLE_VAR).filter(|r| roles.iter().any(|x| x == r)));
+        let in_role = |name: &str| {
+            self.input_roles
+                .get(name)
+                .is_none_or(|used| role.is_some_and(|r| used.iter().any(|x| x == r)))
+        };
         let mut values = BTreeMap::new();
         let mut typed: HashMap<String, Typed> = HashMap::new();
+        let first_var_violation = violations.len();
         for var in &self.vars {
             let mut from_wire = false;
             let in_env = match env::read(var, env) {
@@ -1389,7 +1746,7 @@ impl Contract {
                     .cloned(),
             };
             match found {
-                None if var.required => violations.push(env::missing(var)),
+                None if var.required && in_role(&var.name) => violations.push(env::missing(var)),
                 None => {
                     values.insert(var.name.clone(), None);
                 }
@@ -1403,6 +1760,31 @@ impl Contract {
             }
         }
 
+        // Conditional requirements (SPEC §4.2.1), on the condition
+        // variables' loaded values: the environment, an overlay, the
+        // selected profile or the default. A condition variable with a
+        // violation has no value, so it makes nothing required.
+        let required_when = |name: &str| {
+            self.conditions
+                .get(name)
+                .filter(|c| in_role(name) && c.holds_for(typed.get(&c.var)))
+                .map(Condition::to_string)
+        };
+        for var in &self.vars {
+            if !matches!(values.get(&var.name), Some(None)) {
+                continue;
+            }
+            if let Some(when) = required_when(&var.name) {
+                violations.push(Violation {
+                    input: var.name.clone(),
+                    code: Code::MissingRequired,
+                    message: format!("is required when {when}"),
+                });
+            }
+        }
+        // Variables first, sorted by name, as the unconditional ones are.
+        violations[first_var_violation..].sort_by(|a, b| a.input.cmp(&b.input));
+
         let fcx = FileCx {
             root,
             env: &env.vars,
@@ -1411,7 +1793,20 @@ impl Contract {
         };
         let mut files = BTreeMap::new();
         let mut watched = BTreeMap::new();
-        for f in &self.files {
+        for declared in &self.files {
+            let when = required_when(&declared.name);
+            let required = in_role(&declared.name) && (declared.required || when.is_some());
+            let boot;
+            let f = if required == declared.required && when.is_none() {
+                declared
+            } else {
+                boot = FileDecl {
+                    required,
+                    required_when: when,
+                    ..declared.clone()
+                };
+                &boot
+            };
             let loaded = match files::check(f, &fcx) {
                 Outcome::Absent => None,
                 Outcome::Failed(v) => {

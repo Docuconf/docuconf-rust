@@ -10,6 +10,11 @@
 //! a build without the `tls` or `keystore` cargo feature, which cannot
 //! load TLS key pairs, CA bundles or keystores; it skips the cases whose
 //! contract declares one, and says so.
+//!
+//! `cases.pending.json`, next to `cases.json`, holds the cases of features
+//! not every SDK has yet (conformance/README.md). Its cases with tags this
+//! SDK supports must pass; one with an unknown tag is skipped. Its run is
+//! skipped when the file is missing.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -29,6 +34,8 @@ const SUPPORTED: &[&str] = &[
     "files",
     "profiles",
     "overlays",
+    "required-if",
+    "roles",
 ];
 
 /// File types this build cannot load, by the cargo feature they need.
@@ -171,6 +178,88 @@ fn run(case: &Json) -> Result<(), String> {
     Ok(())
 }
 
+/// What a run of one cases file found.
+struct Tally {
+    total: usize,
+    passed: usize,
+    skipped: usize,
+    feature_skipped: usize,
+    failures: Vec<String>,
+}
+
+/// Runs every case of one cases file.
+fn run_file(data: &str, what: &str) -> Tally {
+    let doc: Json =
+        serde_json::from_str(data).unwrap_or_else(|e| panic!("{what} is not JSON: {e}"));
+    assert_eq!(doc["version"], 1, "unsupported {what} version");
+    let cases = doc["cases"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{what} has no cases"));
+
+    let unbuilt = unbuilt_file_types();
+    let mut t = Tally {
+        total: cases.len(),
+        passed: 0,
+        skipped: 0,
+        feature_skipped: 0,
+        failures: Vec::new(),
+    };
+    for case in cases {
+        let id = case["id"].as_str().unwrap_or("<no id>");
+        let missing: Vec<&str> = case["requires"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Json::as_str)
+            .filter(|t| !SUPPORTED.contains(t))
+            .collect();
+        if !missing.is_empty() {
+            t.skipped += 1;
+            eprintln!("skip {id}: requires {}", missing.join(", "));
+            continue;
+        }
+        let needs: Vec<&str> = case["contract"]["files"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(_, f)| {
+                let t = f["type"].as_str()?;
+                unbuilt
+                    .iter()
+                    .find(|(ty, _)| *ty == t)
+                    .map(|(_, feat)| *feat)
+            })
+            .collect();
+        if let Some(feature) = needs.first() {
+            t.feature_skipped += 1;
+            eprintln!("skip {id}: this build has no `{feature}` cargo feature");
+            continue;
+        }
+        match run(case) {
+            Ok(()) => t.passed += 1,
+            Err(why) => t.failures.push(format!("{id}: {why}")),
+        }
+    }
+    eprintln!(
+        "conformance ({what}): {} cases, {} passed, {} failed, {} skipped, {} skipped for a disabled cargo feature",
+        t.total,
+        t.passed,
+        t.failures.len(),
+        t.skipped,
+        t.feature_skipped,
+    );
+    assert!(
+        t.failures.is_empty(),
+        "{} conformance case(s) in {what} failed:\n  {}",
+        t.failures.len(),
+        t.failures.join("\n  ")
+    );
+    if unbuilt.is_empty() {
+        assert_eq!(t.feature_skipped, 0);
+    }
+    t
+}
+
 #[test]
 fn conformance_suite() {
     let path = cases_path();
@@ -190,64 +279,29 @@ fn conformance_suite() {
             return;
         }
     };
-    let doc: Json = serde_json::from_str(&data).expect("cases.json is not JSON");
-    assert_eq!(doc["version"], 1, "unsupported cases.json version");
-    let cases = doc["cases"].as_array().expect("cases.json has no cases");
-
-    let unbuilt = unbuilt_file_types();
-    let (mut passed, mut skipped, mut feature_skipped, mut failures) = (0, 0, 0, Vec::new());
-    for case in cases {
-        let id = case["id"].as_str().unwrap_or("<no id>");
-        let missing: Vec<&str> = case["requires"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Json::as_str)
-            .filter(|t| !SUPPORTED.contains(t))
-            .collect();
-        if !missing.is_empty() {
-            skipped += 1;
-            eprintln!("skip {id}: requires {}", missing.join(", "));
-            continue;
-        }
-        let needs: Vec<&str> = case["contract"]["files"]
-            .as_object()
-            .into_iter()
-            .flatten()
-            .filter_map(|(_, f)| {
-                let t = f["type"].as_str()?;
-                unbuilt
-                    .iter()
-                    .find(|(ty, _)| *ty == t)
-                    .map(|(_, feat)| *feat)
-            })
-            .collect();
-        if let Some(feature) = needs.first() {
-            feature_skipped += 1;
-            eprintln!("skip {id}: this build has no `{feature}` cargo feature");
-            continue;
-        }
-        match run(case) {
-            Ok(()) => passed += 1,
-            Err(why) => failures.push(format!("{id}: {why}")),
-        }
-    }
-    eprintln!(
-        "conformance: {} cases, {passed} passed, {} failed, {skipped} skipped, {feature_skipped} skipped for a disabled cargo feature",
-        cases.len(),
-        failures.len(),
-    );
-    assert!(
-        failures.is_empty(),
-        "{} conformance case(s) failed:\n  {}",
-        failures.len(),
-        failures.join("\n  ")
-    );
+    let t = run_file(&data, "cases.json");
     assert_eq!(
-        skipped, 0,
-        "this SDK must run every case, but skipped {skipped} (see the skip lines above)"
+        t.skipped, 0,
+        "this SDK must run every case, but skipped {} (see the skip lines above)",
+        t.skipped
     );
-    if unbuilt.is_empty() {
-        assert_eq!(feature_skipped, 0);
-    }
+}
+
+/// The pending cases (conformance/README.md): those with tags this SDK
+/// supports must pass, those with another tag are skipped, and a missing
+/// file skips the run.
+#[test]
+fn conformance_pending() {
+    let path = cases_path().with_file_name("cases.pending.json");
+    let data = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!(
+                "skipping the pending conformance cases: {} ({e})",
+                path.display()
+            );
+            return;
+        }
+    };
+    run_file(&data, "cases.pending.json");
 }

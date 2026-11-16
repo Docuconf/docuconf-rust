@@ -54,7 +54,11 @@ impl Ctx<'_> {
             Ok(m) => m,
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 return if required {
-                    Err(self.v(Code::FileMissing, format!("{shown} does not exist")))
+                    let when = match &self.decl.required_when {
+                        Some(w) => format!(", and is required when {w}"),
+                        None => String::new(),
+                    };
+                    Err(self.v(Code::FileMissing, format!("{shown} does not exist{when}")))
                 } else {
                     Ok(None)
                 };
