@@ -1,0 +1,16 @@
+[package]
+name = "shop"
+description = "Example app: roles, requiredIf and an included fragment, loaded contract-first with docuconf"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# The SDK in this repository, not a published version. Contract-first mode
+# needs none of the TLS or keystore features.
+docuconf = { path = "../../docuconf", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"

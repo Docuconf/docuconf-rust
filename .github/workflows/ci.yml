@@ -114,10 +114,12 @@ jobs:
 
       - name: Package
         if: matrix.rust == 'stable'
-        run: cargo package --workspace --exclude orders --exclude docuconf-readme --locked
+        run: cargo package --workspace --exclude orders --exclude shop --exclude docuconf-readme --locked
 
-  # examples/orders: builds against the SDK in this repository, keeps its
-  # committed contract.cue in step with the code, and boots.
+  # examples/orders and examples/shop: build against the SDK in this
+  # repository, keep their committed contracts valid (and orders' in step
+  # with the code), keep their generated docs up to date, and boot. Their
+  # unit tests run in the test job's `cargo test --workspace`.
   example:
     runs-on: ubuntu-latest
     steps:
@@ -150,7 +152,7 @@ jobs:
         run: go install cuelang.org/go/cmd/cue@v0.17.1
 
       - name: Build
-        run: cargo build --locked -p orders
+        run: cargo build --locked -p orders -p shop
 
       - name: Contract is up to date
         working-directory: examples/orders
@@ -164,6 +166,24 @@ jobs:
           cp -r docuconf-go/spec/cue/cue.mod docuconf-go/spec/cue/contract "$vet/"
           cp examples/orders/contract.cue "$vet/orders/"
           cd "$vet" && "$(go env GOPATH)/bin/cue" vet -c ./orders
+
+      # shop is contract-first: contract.json (which the app embeds) and
+      # contract.cue are both written by hand. Vet both, and check that they
+      # are the same contract.
+      - name: Vet the shop contract
+        run: |
+          vet="$RUNNER_TEMP/vet-shop"
+          cue="$(go env GOPATH)/bin/cue"
+          mkdir -p "$vet/shop"
+          cp -r docuconf-go/spec/cue/cue.mod docuconf-go/spec/cue/contract "$vet/"
+          cp examples/shop/contract.cue "$vet/shop/"
+          cp examples/shop/contract.json "$vet/"
+          cd "$vet"
+          "$cue" vet -c ./shop
+          "$cue" vet -c ./contract contract.json -d '#Contract'
+          "$cue" export ./shop | jq -S . > from-cue.json
+          "$cue" export ./contract contract.json -d '#Contract' | jq -S . > from-json.json
+          diff -u from-json.json from-cue.json
 
       - name: Install the docuconf CLI
         working-directory: docuconf-go/cmd/docuconf
@@ -180,5 +200,15 @@ jobs:
           docuconf docs contract.cue --format agents --check CONFIG.agents.md
           docuconf docs contract.cue --format model --check docs.json
 
+      - name: Generated shop docs are up to date
+        working-directory: examples/shop
+        run: |
+          docuconf docs contract.cue --check CONFIG.md
+          docuconf docs contract.cue --format agents --check CONFIG.agents.md
+          docuconf docs contract.cue --format model --check docs.json
+
       - name: Smoke test
         run: examples/orders/smoke.sh
+
+      - name: Smoke test shop
+        run: examples/shop/smoke.sh

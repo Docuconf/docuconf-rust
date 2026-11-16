@@ -54,7 +54,7 @@ jobs:
           cargo fmt --all --check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-features --locked
-          cargo package --workspace --exclude orders --exclude docuconf-readme --locked
+          cargo package --workspace --exclude orders --exclude shop --exclude docuconf-readme --locked
         env:
           DOCUCONF_SPEC_CUE: ${{ github.workspace }}/docuconf-go/spec/cue
           DOCUCONF_REQUIRE_VET: "1"
@@ -119,7 +119,7 @@ jobs:
           cargo fmt --all --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --locked
-          cargo package --workspace --exclude orders --locked
+          cargo package --workspace --exclude orders --exclude shop --locked
         env:
           DOCUCONF_SPEC_CUE: ${{ github.workspace }}/docuconf-go/spec/cue
           DOCUCONF_REQUIRE_VET: "1"
